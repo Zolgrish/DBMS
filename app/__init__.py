@@ -1,0 +1,1 @@
+"""QLDSV desktop application."""
