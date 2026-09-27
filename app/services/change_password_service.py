@@ -26,9 +26,11 @@ class ChangePasswordService:
         if current_user is None or not current_user.get("username"):
             raise ChangePasswordError("Phiên đăng nhập không còn hợp lệ.")
         if not current_password:
-            raise ChangePasswordError("Vui lòng nhập mật khẩu hiện tại.")
+            raise ChangePasswordError("Mật khẩu hiện tại không được để trống.")
         if not new_password:
             raise ChangePasswordError("Mật khẩu mới không được để trống.")
+        if not confirm_password:
+            raise ChangePasswordError("Vui lòng xác nhận mật khẩu mới.")
         if len(new_password) > 255:
             raise ChangePasswordError("Mật khẩu mới không được vượt quá 255 ký tự.")
         if new_password != confirm_password:
@@ -40,7 +42,7 @@ class ChangePasswordService:
                 current_password,
                 new_password,
             )
-        except pyodbc.Error:
+        except (pyodbc.Error, ValueError):
             logging.exception("Không thể cập nhật mật khẩu trong SQL Server.")
             raise ChangePasswordError("Không thể truy cập cơ sở dữ liệu.") from None
 

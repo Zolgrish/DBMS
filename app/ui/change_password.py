@@ -79,5 +79,5 @@ class ChangePasswordDialog(QDialog):
         self.current_password_input.clear()
         self.new_password_input.clear()
         self.confirm_password_input.clear()
-        QMessageBox.information(self, "Đổi mật khẩu", "Đổi mật khẩu thành công")
+        QMessageBox.information(self, "Đổi mật khẩu", "Đổi mật khẩu thành công.")
         self.accept()
