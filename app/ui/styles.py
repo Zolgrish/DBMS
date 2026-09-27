@@ -17,13 +17,22 @@ DIALOG_STYLE = """
     }
     QPushButton:hover { color: #104675; background: #d2e6f9; border-color: #6aabdc; }
     QPushButton:pressed { color: #ffffff; background: #1769aa; }
-    QPushButton#saveAccountButton, QPushButton#changePasswordButton, QPushButton#addAccountButton {
+    QPushButton#saveAccountButton, QPushButton#changePasswordButton,
+    QPushButton#addAccountButton, QPushButton#backupButton {
         color: #ffffff; background: #1769aa; border-color: #1769aa;
     }
     QPushButton#saveAccountButton:hover, QPushButton#changePasswordButton:hover,
-    QPushButton#addAccountButton:hover { background: #10578f; border-color: #10578f; }
+    QPushButton#addAccountButton:hover, QPushButton#backupButton:hover {
+        background: #10578f; border-color: #10578f;
+    }
     QPushButton#saveAccountButton:pressed, QPushButton#changePasswordButton:pressed,
-    QPushButton#addAccountButton:pressed { background: #0b426e; }
+    QPushButton#addAccountButton:pressed, QPushButton#backupButton:pressed {
+        background: #0b426e;
+    }
+    QPushButton#restoreButton { color: #ffffff; background: #a63329; border-color: #a63329; }
+    QPushButton#restoreButton:hover { background: #84241c; border-color: #84241c; }
+    QPushButton#restoreButton:pressed { background: #671a14; }
+    QPushButton#restoreButton:disabled { color: #637589; background: #dce4ed; border-color: #c5d1de; }
     QTableWidget {
         color: #19324d; background: #ffffff; alternate-background-color: #f0f5fb;
         gridline-color: #d9e3ee; border: 1px solid #cbd9e7;

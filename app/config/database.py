@@ -30,11 +30,11 @@ def _odbc_value(value: str) -> str:
     return "{" + value.replace("}", "}}") + "}"
 
 
-def get_connection_string() -> str:
+def get_connection_string(database_override: str | None = None) -> str:
     """Build the connection string from environment variables loaded from .env."""
     driver = _required_setting("DB_DRIVER")
     server = _required_setting("DB_SERVER")
-    database = _required_setting("DB_DATABASE")
+    database = database_override or _required_setting("DB_DATABASE")
     trusted = _required_setting("DB_TRUSTED_CONNECTION").lower()
 
     parts = [
@@ -59,9 +59,13 @@ def get_connection_string() -> str:
     return ";".join(parts) + ";"
 
 
-def get_connection() -> pyodbc.Connection:
-    """Open a SQL Server connection."""
-    return pyodbc.connect(get_connection_string(), timeout=5)
+def get_connection(
+    database_override: str | None = None, *, autocommit: bool = False
+) -> pyodbc.Connection:
+    """Open a SQL Server connection; backup operations can target master."""
+    return pyodbc.connect(
+        get_connection_string(database_override), timeout=5, autocommit=autocommit
+    )
 
 
 def check_database_connection() -> str:

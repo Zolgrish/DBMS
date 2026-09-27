@@ -13,6 +13,14 @@
 
 Khóa/mở khóa tài khoản là chức năng bổ sung ngoài các mã ADM ở trên. Người dùng đã đăng nhập có thể đổi mật khẩu bằng mật khẩu hiện tại; thao tác này giữ nguyên session.
 
+## Epic 1.6 — Sao lưu / Phục hồi
+
+Admin mở **Sao lưu / Phục hồi** từ dashboard. Ứng dụng tạo bản sao lưu đầy đủ của `QLDSV` với tên `QLDSV_YYYYMMDD_HHMMSS_ffffff.bak`, liệt kê các file `.bak` và thời gian sửa đổi từ thư mục được cấu hình. SinhVien không có menu này và service từ chối lời gọi trực tiếp từ phiên không phải Admin.
+
+Đặt `QLDSV_BACKUP_DIR` trong `.env` thành **đường dẫn tuyệt đối tới thư mục đã tồn tại**. Thư mục phải nhìn thấy được từ cả ứng dụng Python lẫn máy chạy SQL Server. Nếu SQL Server chạy trên máy khác, dùng thư mục chia sẻ UNC; không dùng ổ đĩa mạng được map riêng cho người dùng Windows. Tài khoản dịch vụ SQL Server cần quyền đọc/ghi file trong thư mục; tài khoản kết nối SQL cần quyền `BACKUP DATABASE` để sao lưu và quyền phù hợp để phục hồi (thường là `sysadmin`). SQL Server xử lý đường dẫn file sao lưu theo môi trường của dịch vụ SQL Server, không theo thư mục làm việc của ứng dụng.
+
+Trước khi phục hồi, ứng dụng kiểm tra header để xác nhận file là bản sao lưu đầy đủ của `QLDSV`, chạy `RESTORE VERIFYONLY`, rồi yêu cầu Admin xác nhận. Phục hồi sẽ ngắt các kết nối đang dùng database và thay thế dữ liệu hiện tại. Sau khi hoàn tất, ứng dụng đưa database về `MULTI_USER` và trở lại màn hình đăng nhập. Nếu không cấu hình đường dẫn hoặc thiếu quyền, màn hình hiển thị lỗi bằng tiếng Việt. Không nên thử phục hồi trên `QLDSV` đang có dữ liệu cần giữ; hãy dùng database thử nghiệm độc lập để kiểm tra thao tác ghi này.
+
 ## Yêu cầu
 
 - Python 3.10 trở lên
@@ -52,8 +60,11 @@ Tài khoản demo được seed trong database: `admin` / `123456`. Sinh viên m
 - `app/services/authorization.py`: kiểm tra quyền Admin và MASV của Sinh viên từ session
 - `app/services/student_score_service.py`: cung cấp MASV của sinh viên hiện tại cho module điểm sau này
 - `app/services/change_password_service.py`: xác thực mật khẩu hiện tại và cập nhật mật khẩu
+- `app/services/backup_restore_service.py`: quyền Admin, kiểm tra thư mục/file và xử lý lỗi sao lưu/phục hồi
+- `app/repositories/backup_restore_repository.py`: lệnh SQL Server `BACKUP`, kiểm tra file và `RESTORE`
 - `app/ui/account_management.py`: danh sách và form quản lý tài khoản
 - `app/ui/change_password.py`: form đổi mật khẩu
+- `app/ui/backup_restore.py`: danh sách file sao lưu, tạo sao lưu và xác nhận phục hồi
 - `app/ui/`: form đăng nhập và dashboard theo vai trò
 - `app/utils/session.py`: session trong bộ nhớ
 - `database/`: các script SQL hiện có, không bị thay đổi bởi milestone này
