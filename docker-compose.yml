@@ -1,0 +1,48 @@
+name: qldsv
+
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: qldsv-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_PID: "Developer"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env first}"
+    ports:
+      - "${MSSQL_PORT:-14330}:1433"
+    volumes:
+      - qldsv_sql_data:/var/opt/mssql
+      - ./backups:/var/opt/mssql/backups
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          if [ -x /opt/mssql-tools18/bin/sqlcmd ]; then SQLCMD=/opt/mssql-tools18/bin/sqlcmd;
+          elif [ -x /opt/mssql-tools/bin/sqlcmd ]; then SQLCMD=/opt/mssql-tools/bin/sqlcmd;
+          else exit 1; fi;
+          "$$SQLCMD" -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" >/dev/null 2>&1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    restart: unless-stopped
+
+  db-init:
+    build:
+      context: .
+      dockerfile: docker/db-init.Dockerfile
+    container_name: qldsv-db-init
+    environment:
+      DB_HOST: sqlserver
+      DB_PORT: "1433"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:?Set MSSQL_SA_PASSWORD in .env first}"
+      QLDSV_ADMIN_LOGIN: "${QLDSV_ADMIN_LOGIN:-GV00000001}"
+      QLDSV_ADMIN_PASSWORD: "${QLDSV_ADMIN_PASSWORD:-}"
+      QLDSV_STUDENT_LOGIN: "${QLDSV_STUDENT_LOGIN:-SV00000001}"
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    restart: "no"
+
+volumes:
+  qldsv_sql_data:
