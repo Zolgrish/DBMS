@@ -40,7 +40,7 @@ BEGIN TRY
     IF EXISTS (SELECT 1 FROM sys.server_role_members rm
                JOIN sys.server_principals r ON r.principal_id = rm.role_principal_id
                JOIN sys.server_principals m ON m.principal_id = rm.member_principal_id
-               WHERE (m.name = @Student) OR (m.name = @Admin AND r.name <> N'dbcreator'))
+               WHERE (m.name = @Student) OR (m.name = @Admin AND r.name NOT IN (N'dbcreator', N'QLDSV_ACCOUNT_ADMIN')))
         THROW 51005, 'SEC-04/05: Unexpected server role on a demo login. Remove conflicting membership explicitly before rerunning.', 1;
     IF EXISTS (SELECT 1 FROM sys.server_permissions p
                JOIN sys.server_principals m ON m.principal_id = p.grantee_principal_id
@@ -53,16 +53,38 @@ BEGIN TRY
                  AND (p.permission_name NOT IN (N'CONNECT SQL', N'VIEW ANY DATABASE', N'ALTER ANY LOGIN')
                       OR p.state = 'W'))
         THROW 51004, 'SEC-04: Admin has broader server grants than this bootstrap requires. Resolve them explicitly before rerunning.', 1;
+    -- Technical server role, separate from the two business database roles.
+    IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name=N'QLDSV_ACCOUNT_ADMIN'
+               AND (type<>'R' OR is_fixed_role<>0 OR owning_principal_id<>1))
+        THROW 51004, 'SEC-04: QLDSV_ACCOUNT_ADMIN must be a user-defined server role owned by the provisioning sa principal.', 1;
+    IF EXISTS (SELECT 1 FROM sys.server_role_members WHERE member_principal_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN'))
+       OR EXISTS (SELECT 1 FROM sys.server_permissions WHERE grantee_principal_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN')
+                  AND NOT (state='G' AND ((class=100 AND permission_name=N'ALTER ANY LOGIN')
+                       OR (class=101 AND major_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN') AND permission_name=N'ALTER'))))
+        THROW 51004, 'SEC-04: Technical server role has unexpected nesting/permissions; resolve explicitly.', 1;
 
     USE QLDSV;
+    -- Validate every privileged member, including delegated/non-demo logins.
+    -- A missing/ambiguous role lookup is invalid, never implicit authorization.
+    IF EXISTS (
+        SELECT 1 FROM sys.server_role_members rm
+        JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
+        JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
+        WHERE r.name=N'QLDSV_ACCOUNT_ADMIN' AND
+              (m.type<>'S' OR m.principal_id=1 OR NOT EXISTS (
+                  SELECT 1 FROM sys.database_principals u
+                  WHERE u.sid=m.sid AND u.type='S' AND u.authentication_type=1 AND u.principal_id>4
+                    AND ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN',u.name),-1)=1
+                    AND ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN',u.name),-1)=0)))
+        THROW 51007, 'SEC-04: Invalid QLDSV_ACCOUNT_ADMIN member. Require a SQL Login mapped by SID to a QLDSV Admin User without Student membership. Review and explicitly correct membership/mapping, then rerun; no automatic changes were made.', 1;
     IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name = N'QLDSV_GIANGVIEN')
         THROW 51003, 'SEC-03: Unexpected QLDSV_GIANGVIEN principal exists. Resolve it explicitly; only two business roles are supported.', 1;
     IF EXISTS (SELECT 1 FROM sys.database_principals
                WHERE name IN (N'QLDSV_ADMIN', N'QLDSV_SINHVIEN')
                  AND (type <> 'R' OR owning_principal_id <> DATABASE_PRINCIPAL_ID(N'dbo')))
         THROW 51003, 'SEC-03: Business role name/type/owner collision; expected database roles owned by dbo.', 1;
-    IF @Admin IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN')
-       OR @Student IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN')
+    IF @Admin IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
+       OR @Student IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
         THROW 51002, 'SEC-02: Reserved principal name.', 1;
     IF NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV = @Student)
         THROW 51002, 'SEC-02: Student demo login must match an existing Sinhvien.MASV. Run seedData.sql first.', 1;
@@ -90,12 +112,13 @@ BEGIN TRY
        OR EXISTS (SELECT 1 FROM sys.objects
                   WHERE principal_id IN (DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')))
         THROW 51005, 'SEC-05: Student user/role must not own schemas or objects.', 1;
-    -- Allow a future object-specific safe score grant, but never broad grants.
+    -- Exactly the two safe Epic 1.4 object grants; never broad EXECUTE.
     IF EXISTS (SELECT 1 FROM sys.database_permissions p
                WHERE p.grantee_principal_id IN (DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN'))
                  AND p.state IN ('G', 'W') AND NOT
                  ((p.class = 0 AND p.permission_name = N'CONNECT') OR
-                  (p.class = 1 AND p.major_id = ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemDiem'), -1)
+                  (p.class = 1 AND p.major_id IN (ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemDiem'), -1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'), -1))
                    AND p.permission_name = N'EXECUTE' AND p.state = 'G')))
         THROW 51005, 'SEC-05: Unexpected Student grants exist. Remove unsafe grants explicitly before rerunning.', 1;
 
@@ -127,7 +150,21 @@ BEGIN TRY
         PRINT N'SEC-02: Created Student demo SQL Login (assignment default; policy OFF only for Student).';
     END
     ELSE PRINT N'SEC-02: Verified existing Student SQL Login; password unchanged.';
-    SET @sql = N'GRANT ALTER ANY LOGIN TO ' + QUOTENAME(@Admin) + N';';
+    IF SUSER_ID(N'QLDSV_ACCOUNT_ADMIN') IS NULL
+    BEGIN
+        SET @sql=N'CREATE SERVER ROLE QLDSV_ACCOUNT_ADMIN AUTHORIZATION '+QUOTENAME(SUSER_NAME(1))+N';';
+        EXEC (@sql);
+    END;
+    GRANT ALTER ANY LOGIN TO QLDSV_ACCOUNT_ADMIN;
+    GRANT ALTER ON SERVER ROLE::QLDSV_ACCOUNT_ADMIN TO QLDSV_ACCOUNT_ADMIN;
+    IF NOT EXISTS (SELECT 1 FROM sys.server_role_members
+                   WHERE role_principal_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN') AND member_principal_id=SUSER_ID(@Admin))
+    BEGIN
+        SET @sql=N'ALTER SERVER ROLE QLDSV_ACCOUNT_ADMIN ADD MEMBER '+QUOTENAME(@Admin)+N';';
+        EXEC (@sql);
+    END;
+    -- Migrate Epic 1.3's direct grant to the inherited technical-role grant.
+    SET @sql = N'REVOKE ALTER ANY LOGIN FROM ' + QUOTENAME(@Admin) + N';';
     EXEC (@sql);
     IF NOT EXISTS (SELECT 1 FROM sys.server_role_members
                    WHERE role_principal_id = SUSER_ID(N'dbcreator') AND member_principal_id = SUSER_ID(@Admin))
@@ -180,8 +217,8 @@ BEGIN TRY
     DENY EXECUTE ON OBJECT::dbo.sp_CheckMaMH TO QLDSV_SINHVIEN;
     DENY EXECUTE ON OBJECT::dbo.sp_GetActiveStudents TO QLDSV_SINHVIEN;
     COMMIT TRANSACTION;
-    PRINT N'SEC-01..06: Security bootstrap complete. Admin: CONTROL DATABASE, ALTER ANY LOGIN, dbcreator; Student: CONNECT, data/common-SP denials.';
-    PRINT N'SEC-07: Run real-principal verification. Own-score SP waits for Epic 1.4; application SQL login waits for Epic 1.5.';
+    PRINT N'SEC-01..06: Security bootstrap complete. Admin: CONTROL DATABASE, QLDSV_ACCOUNT_ADMIN (ALTER ANY LOGIN/self-ALTER), dbcreator; Student: CONNECT, data/common-SP denials.';
+    PRINT N'SEC-07: Run real-principal verification; security procedures run next. Application SQL login waits for Epic 1.5.';
 END TRY
 BEGIN CATCH
     IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;

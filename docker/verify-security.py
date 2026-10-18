@@ -124,7 +124,11 @@ def verify_admin(password):
     query = """
 IF ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'), -1) <> 0
  OR ISNULL(IS_SRVROLEMEMBER(N'dbcreator'), -1) <> 1
- OR HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY LOGIN') <> 1
+ OR ISNULL(IS_SRVROLEMEMBER(N'QLDSV_ACCOUNT_ADMIN'), -1) <> 1
+ OR ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY LOGIN'), -1) <> 1
+ OR ISNULL(HAS_PERMS_BY_NAME(N'QLDSV_ACCOUNT_ADMIN', 'SERVER ROLE', 'ALTER'), -1) <> 1
+ OR ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'CONTROL SERVER'), -1) <> 0
+ OR ISNULL(HAS_PERMS_BY_NAME(NULL, NULL, 'ALTER ANY SERVER ROLE'), -1) <> 0
  OR HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CONTROL') <> 1
  OR HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'BACKUP DATABASE') <> 1
     THROW 51103, 'Admin permission mismatch.', 1;
@@ -400,7 +404,8 @@ def main():
     verify_student(student_password)
     metadata()
     print("PASS cleanup: Student password restored; no permanent test objects/principals")
-    print("DEFERRED: own-score safe SP (Epic 1.4); application SQL-credential login (Epic 1.5)")
+    print("Epic 1.4 procedure checks: python docker/verify-security-procedures.py")
+    print("DEFERRED: application SQL-credential login (Epic 1.5)")
 
 
 if __name__ == "__main__":

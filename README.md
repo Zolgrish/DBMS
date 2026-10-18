@@ -8,7 +8,7 @@
 - Repository có thêm bảng bổ trợ `PhanCong` để map `Giangvien - Lop - Monhoc`.
 - Epic 1.2: common Stored Procedure `SP-01 -> SP-09`.
 - `dbo.TaiKhoan` đã bị loại khỏi kiến trúc mục tiêu. Docker **không** chạy `CreateTaiKhoan.sql` hoặc `seedTaiKhoan.sql`.
-- Epic 1.3 đã bootstrap SQL Server Login -> Database User -> `QLDSV_ADMIN` / `QLDSV_SINHVIEN` -> GRANT/DENY. Security SP và app login thuộc Epic 1.4/1.5.
+- Epic 1.3 bootstrap Login/User/Role; Epic 1.4 cung cấp security SP và ủy quyền tạo account qua server role kỹ thuật. App login thuộc Epic 1.5.
 - Python authentication hiện vẫn đang trong giai đoạn migration khỏi code legacy `dbo.TaiKhoan`; không coi code auth cũ là source of truth.
 
 Xem `AGENTS.md` và `specs/README.md` trước khi triển khai ticket mới.
@@ -59,7 +59,7 @@ SQL scripts được chạy theo thứ tự:
 3. storedProcedure.sql
 4. seedData.sql
 5. Security.sql                    (bắt buộc, Epic 1.3)
-6. StoredProcedures_Security.sql   (tự chạy khi file được thêm ở Epic 1.4)
+6. StoredProcedures_Security.sql   (Epic 1.4, chạy qua hook hiện có)
 ```
 
 `CreateTaiKhoan.sql` và `seedTaiKhoan.sql` được giữ như legacy source hiện tại nhưng **không nằm trong bootstrap Docker**, nên `dbo.TaiKhoan` không bị tạo lại.
@@ -109,10 +109,10 @@ Login có sẵn **không bị tạo lại, reset password hoặc đổi password
 | Kết nối `QLDSV` | GRANT CONNECT | GRANT CONNECT |
 | Database | GRANT CONTROL ON DATABASE::QLDSV | DENY SELECT, INSERT, UPDATE, DELETE ON SCHEMA::dbo |
 | SP-01..SP-09 | Được thực thi qua CONTROL | DENY EXECUTE từng procedure |
-| Server | GRANT ALTER ANY LOGIN; member `dbcreator` | Không server role quản trị hoặc quyền quản trị Login |
-| Safe Student SP | Chờ Epic 1.4 | Chờ grant EXECUTE từng SP ở Epic 1.4 |
+| Server | Member `QLDSV_ACCOUNT_ADMIN` và `dbcreator` | Không server role quản trị hoặc quyền quản trị Login |
+| Safe Student SP | EXECUTE qua CONTROL (SP điểm yêu cầu Student) | GRANT EXECUTE riêng `sp_ThongTinDangNhap`, `sp_SinhVien_XemDiem` |
 
-`ALTER ANY LOGIN` đủ cho tạo/đổi/xóa Login; `dbcreator` phục vụ Restore. Không cấp `sysadmin`, `securityadmin` hoặc nest custom role vào `db_owner`. Student không được GRANT/DENY EXECUTE toàn schema `dbo`; safe SP dùng static SQL cùng owner vẫn có thể hoạt động qua ownership chaining sau khi được grant riêng ở Epic 1.4.
+`QLDSV_ACCOUNT_ADMIN` là **server role kỹ thuật**, không phải business database role thứ ba. Role có `ALTER ANY LOGIN` và `ALTER ON SERVER ROLE::QLDSV_ACCOUNT_ADMIN` trên chính nó để Admin hợp lệ ủy quyền membership cho Admin mới; `dbcreator` phục vụ Restore và thành viên của nó có thể thêm/bỏ thành viên cùng role. Bootstrap chuyển direct grant `ALTER ANY LOGIN` cũ sang quyền kế thừa từ technical role. Không cấp `sysadmin`, `securityadmin`, `CONTROL SERVER`, `ALTER ANY SERVER ROLE` toàn server hoặc nest custom role vào `db_owner`. Student không được GRANT/DENY EXECUTE toàn schema `dbo`; safe SP dùng static SQL cùng owner hoạt động qua ownership chaining.
 
 Kết nối SSMS bằng **SQL Server Authentication**, server `localhost,14330`, database `QLDSV`:
 
@@ -144,7 +144,33 @@ Script hỏi kín password Admin hiện tại, hoặc nhận `QLDSV_ADMIN_PASSWO
 
 Test gồm identity/role, Student data/SP denials, Admin CRUD/DDL/Login management, Backup/Restore trên **database tạm có tên duy nhất**, và hai lần bootstrap lại. Test tạm đổi password Student để chứng minh bootstrap không reset, rồi phục hồi password ban đầu trong `finally`; nên chạy khi demo Student không có phiên làm việc cần giữ. Object/Login/database/file backup tạm được dọn sau test; không Restore hoặc thay đổi business data của `QLDSV`.
 
-SEC-07 **chưa** nghiệm thu Student gọi `sp_SinhVien_XemDiem` thành công: SP này thuộc Epic 1.4. Login form dùng credential SQL người dùng thuộc Epic 1.5. Epic 1.3 không tạo SP giả hoặc sửa Python authentication để đánh dấu hai phần này hoàn tất.
+SEC-07 own-score SP được kiểm chứng ở Epic 1.4 dưới đây. Login form dùng credential SQL người dùng vẫn thuộc Epic 1.5; Python authentication chưa được migrate.
+
+## Epic 1.4 — Stored Procedures bảo mật
+
+`database/StoredProcedures_Security.sql` dùng DROP/CREATE tương thích SQL Server 2014 và cấp lại object permissions mỗi lần chạy. Các SP chạy dưới caller thật, không `EXECUTE AS OWNER`, không `TRUSTWORTHY`, không dùng `dbo.TaiKhoan`.
+
+| Procedure / chữ ký | Hành vi |
+|---|---|
+| `sp_TaoTaiKhoan @LoginName nvarchar(max), @Role nvarchar(max), @Password nvarchar(max)=NULL` | Chỉ Admin; Login → mapped User → business role. Admin mới nhận policy ON, technical role và `dbcreator`; Student phải có MASV thật, password NULL/rỗng ở input rồi server áp `123456`, policy/expiration OFF. |
+| `sp_XoaTaiKhoan @LoginName nvarchar(max)` | Chỉ Admin; kiểm tra mapping/SID, đúng một business role, server membership, ownership; chặn self-delete. Bỏ memberships → DROP USER → DROP LOGIN trong transaction. Login có session hoạt động làm rollback toàn bộ; không KILL session. |
+| `sp_ThongTinDangNhap` — không tham số | Một dòng `LoginName`, `DatabaseUser`, `RoleName` (đều `sysname`); suy ra từ SQL connection, chặn không role/dual role/mapping sai/NULL. |
+| `sp_SinhVien_XemDiem` — không tham số | Student-only; `USER_NAME()` là MASV. Trả `MAMH nchar(5)`, `TENMH nvarchar(40)`, `LAN smallint`, `DIEM float NULL`, theo `MAMH, LAN`, raw attempts của chính Student đang học (`NGHIHOC=0`). Không MAX hoặc quy ước mới cho điểm NULL. |
+
+Input dùng `nvarchar(max)` để kiểm tra vượt 128 UTF-16 code units **trước** khi chuyển thành `sysname`; không để SQL tự truncate input. Role chỉ nhận đúng `QLDSV_ADMIN` hoặc `QLDSV_SINHVIEN`. Identifier được QUOTENAME, password được escape, lỗi `52000..52099` không chứa password/SQL động. CREATE/DROP principal và thay đổi memberships có TRY/CATCH, XACT_ABORT và rollback; lỗi cũng rollback transaction bên ngoài nếu caller đang mở transaction.
+
+Admin có EXECUTE trên cả bốn SP (SP điểm vẫn yêu cầu Student). Student bị **DENY EXECUTE** trên `sp_TaoTaiKhoan`, `sp_XoaTaiKhoan`; chỉ được **GRANT EXECUTE** riêng trên `sp_ThongTinDangNhap`, `sp_SinhVien_XemDiem`. Data/schema và common-SP denials từ Epic 1.3 được giữ nguyên. `Security.sql` chỉ chấp nhận CONNECT và hai safe object grants này trong Student preflight.
+
+Kiểm chứng real-principal sau khi bootstrap:
+
+```powershell
+python docker/verify-security-procedures.py
+python docker/verify-security.py
+```
+
+Verifier Epic 1.4 dùng password Admin hiện tại từ process hoặc hidden prompt; từ chối chạy nếu `SV00000002` đã có Login/User để không đụng account có sẵn. Nó tạo Admin tạm bằng SP, dùng chính Admin mới tạo Student `SV00000002/123456`, kiểm tra 3 raw attempts seed, SQL identity và các lệnh bị chặn. Test gồm self-delete, identity không role/dual role, collisions, input/injection, late-failure rollback sau CREATE LOGIN, và giữ một connection Admin tạm để chứng minh DROP LOGIN thất bại rồi rollback cả User/roles. Sau khi tự đóng connection đó, delete thành công. Không KILL session hoặc Restore QLDSV. Principal/object tạm được dọn trong `finally`; không sửa dữ liệu nghiệp vụ.
+
+Verifier rebuild image `db-init` từ working tree trước khi thay đổi principal, chạy procedure file hai lần và Docker db-init lại, chứng minh quyền được cấp lại và password đã đổi được giữ nguyên. Migration Login/Account UI, per-user Python connection, đổi mật khẩu UI và auto account từ CRUD Sinh viên đều thuộc các milestone sau.
 
 ## Reset database development
 
