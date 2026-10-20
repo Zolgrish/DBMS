@@ -10,3 +10,4 @@ class User:
     masv: str | None
     magv: str | None
     active: bool
+    full_name: str = ""

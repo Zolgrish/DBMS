@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
 
 from app.models.user import User
 from app.ui.change_password import ChangePasswordDialog
+from app.utils import session
 
 
 class DashboardWindow(QMainWindow):
@@ -137,3 +138,7 @@ class DashboardWindow(QMainWindow):
             return
 
         QMessageBox.information(self, action, "Chức năng chưa được triển khai.")
+
+    def closeEvent(self, event) -> None:
+        session.clear_session()
+        super().closeEvent(event)

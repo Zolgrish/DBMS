@@ -4,4 +4,6 @@ __pycache__/
 .env
 .pytest_cache/
 backups/
-tests/
+tests/*
+!tests/test_epic_1_5_auth.py
+!tests/test_backup_restore.py

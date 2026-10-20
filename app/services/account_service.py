@@ -25,6 +25,8 @@ class AccountService:
         require_admin()
         try:
             return self._accounts.find_all_accounts()
+        except session.SessionRequiredError:
+            self._raise_session_error()
         except pyodbc.Error:
             self._raise_database_error()
 
@@ -56,6 +58,8 @@ class AccountService:
             raise
         except pyodbc.IntegrityError as error:
             self._raise_integrity_error(error, username_duplicate=True)
+        except session.SessionRequiredError:
+            self._raise_session_error()
         except pyodbc.Error:
             self._raise_database_error()
 
@@ -93,6 +97,8 @@ class AccountService:
             raise
         except pyodbc.IntegrityError as error:
             self._raise_integrity_error(error, username_duplicate=False)
+        except session.SessionRequiredError:
+            self._raise_session_error()
         except pyodbc.Error:
             self._raise_database_error()
 
@@ -115,6 +121,8 @@ class AccountService:
                 raise AccountServiceError("Không tìm thấy username.")
         except AccountServiceError:
             raise
+        except session.SessionRequiredError:
+            self._raise_session_error()
         except pyodbc.Error:
             self._raise_database_error()
 
@@ -148,8 +156,14 @@ class AccountService:
             return role, None, magv
         except AccountServiceError:
             raise
+        except session.SessionRequiredError:
+            self._raise_session_error()
         except pyodbc.Error:
             self._raise_database_error()
+
+    @staticmethod
+    def _raise_session_error() -> None:
+        raise AccountServiceError("Phiên SQL không còn hiệu lực. Vui lòng đăng nhập lại.") from None
 
     @staticmethod
     def _raise_integrity_error(error: pyodbc.IntegrityError, username_duplicate: bool) -> None:

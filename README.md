@@ -8,8 +8,8 @@
 - Repository có thêm bảng bổ trợ `PhanCong` để map `Giangvien - Lop - Monhoc`.
 - Epic 1.2: common Stored Procedure `SP-01 -> SP-09`.
 - `dbo.TaiKhoan` đã bị loại khỏi kiến trúc mục tiêu. Docker **không** chạy `CreateTaiKhoan.sql` hoặc `seedTaiKhoan.sql`.
-- Epic 1.3 bootstrap Login/User/Role; Epic 1.4 cung cấp security SP và ủy quyền tạo account qua server role kỹ thuật. App login thuộc Epic 1.5.
-- Python authentication hiện vẫn đang trong giai đoạn migration khỏi code legacy `dbo.TaiKhoan`; không coi code auth cũ là source of truth.
+- Epic 1.3 bootstrap Login/User/Role; Epic 1.4 cung cấp security SP và ủy quyền tạo account qua server role kỹ thuật.
+- Epic 1.5 đã triển khai Login bằng SQL credential người dùng nhập; identity/role lấy từ `sp_ThongTinDangNhap`, không đọc `dbo.TaiKhoan` để xác thực.
 
 Xem `AGENTS.md` và `specs/README.md` trước khi triển khai ticket mới.
 
@@ -144,7 +144,7 @@ Script hỏi kín password Admin hiện tại, hoặc nhận `QLDSV_ADMIN_PASSWO
 
 Test gồm identity/role, Student data/SP denials, Admin CRUD/DDL/Login management, Backup/Restore trên **database tạm có tên duy nhất**, và hai lần bootstrap lại. Test tạm đổi password Student để chứng minh bootstrap không reset, rồi phục hồi password ban đầu trong `finally`; nên chạy khi demo Student không có phiên làm việc cần giữ. Object/Login/database/file backup tạm được dọn sau test; không Restore hoặc thay đổi business data của `QLDSV`.
 
-SEC-07 own-score SP được kiểm chứng ở Epic 1.4 dưới đây. Login form dùng credential SQL người dùng vẫn thuộc Epic 1.5; Python authentication chưa được migrate.
+SEC-07 own-score SP được kiểm chứng ở Epic 1.4 dưới đây; Login form dùng credential SQL người dùng đã triển khai ở Epic 1.5.
 
 ## Epic 1.4 — Stored Procedures bảo mật
 
@@ -170,7 +170,35 @@ python docker/verify-security.py
 
 Verifier Epic 1.4 dùng password Admin hiện tại từ process hoặc hidden prompt; từ chối chạy nếu `SV00000002` đã có Login/User để không đụng account có sẵn. Nó tạo Admin tạm bằng SP, dùng chính Admin mới tạo Student `SV00000002/123456`, kiểm tra 3 raw attempts seed, SQL identity và các lệnh bị chặn. Test gồm self-delete, identity không role/dual role, collisions, input/injection, late-failure rollback sau CREATE LOGIN, và giữ một connection Admin tạm để chứng minh DROP LOGIN thất bại rồi rollback cả User/roles. Sau khi tự đóng connection đó, delete thành công. Không KILL session hoặc Restore QLDSV. Principal/object tạm được dọn trong `finally`; không sửa dữ liệu nghiệp vụ.
 
-Verifier rebuild image `db-init` từ working tree trước khi thay đổi principal, chạy procedure file hai lần và Docker db-init lại, chứng minh quyền được cấp lại và password đã đổi được giữ nguyên. Migration Login/Account UI, per-user Python connection, đổi mật khẩu UI và auto account từ CRUD Sinh viên đều thuộc các milestone sau.
+Verifier rebuild image `db-init` từ working tree trước khi thay đổi principal, chạy procedure file hai lần và Docker db-init lại, chứng minh quyền được cấp lại và password đã đổi được giữ nguyên. Account UI, đổi mật khẩu UI và auto account từ CRUD Sinh viên thuộc các milestone sau; per-user Python connection được triển khai trong Epic 1.5.
+
+## Epic 1.5 — Đăng nhập bằng SQL Server account
+
+Login form mở connection `QLDSV` bằng chính username/password vừa nhập, chạy `EXEC dbo.sp_ThongTinDangNhap` trên cùng connection và chỉ nhận `QLDSV_ADMIN → Admin` hoặc `QLDSV_SINHVIEN → SinhVien`. `DatabaseUser` trả về là MASV tin cậy của Student; không lấy MASV/role từ UI hoặc `TaiKhoan`.
+
+Ứng dụng chỉ cần `DB_DRIVER`, `DB_SERVER`, `DB_DATABASE` để xác định đích kết nối. Ví dụ Docker dùng `DB_SERVER=localhost,14330`; cấu hình local phải trỏ đúng instance. Không cần `DB_USERNAME`, `DB_PASSWORD` hoặc Trusted Connection. Các biến `QLDSV_ADMIN_*` chỉ phục vụ bootstrap/verifier, không thay credential của Login form.
+
+Session sở hữu connection `QLDSV` đang đăng nhập; Admin có thêm connection `master` mở bằng cùng credential và được kiểm tra cùng SQL Login. Student không có connection master. Connection dài hạn dùng `autocommit=True`; ODBC pooling bị tắt trước khi connect. Repository mượn connection và chỉ đóng cursor. Password không nằm trong User/session, không được giữ lại để reconnect hoặc ghi log. Logout, đóng cửa sổ và shutdown giải phóng các SQL session; mất kết nối yêu cầu đăng nhập lại.
+
+Backup/Restore repository mượn master của Admin. Trước khi restore, connection QLDSV được đóng; sau lần restore đã bắt đầu (thành công hoặc lỗi), session bị xóa và phải đăng nhập lại. Nếu master không thể thực hiện cleanup MULTI_USER, ứng dụng báo lỗi để xử lý SQL Server thủ công; không mở lại connection bằng password lưu sẵn. Mapping đường dẫn Windows/container và migration Backup/Restore đầy đủ vẫn thuộc milestone sau.
+
+Account Management và đổi mật khẩu hiện còn SQL legacy `dbo.TaiKhoan`, chờ Epic 1.6/1.7. Các chức năng đó chưa hoạt động khi bảng không tồn tại; Epic 1.5 không tạo lại bảng và chỉ đổi cách repository mượn connection. Các query/join `full_name` có sẵn được giữ nguyên.
+
+Kiểm chứng app layer bằng SQL principals thật (ODBC + `.venv`):
+
+```powershell
+.\.venv\Scripts\python.exe docker/verify-authentication.py
+```
+
+Verifier nhận password Admin hiện tại từ hidden prompt hoặc process `QLDSV_ADMIN_PASSWORD`, dùng target `DB_*` như app. Nó yêu cầu `SV00000002` chưa có Login/User, tạo Admin tạm và Student qua security SP, kiểm tra SQL identity, repository, own-score SP và SQL denials. Nó giữ connection app để chứng minh DROP LOGIN bị chặn, logout rồi xóa thành công để chứng minh connection vật lý đã đóng. Principals tạm được dọn trong `finally`; không reset password demo, không sửa Student/score data và không restore QLDSV.
+
+Unit/regression tests:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:QT_QPA_PLATFORM='offscreen'
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py' -v
+```
 
 ## Reset database development
 
@@ -202,7 +230,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Sau khi Epic 1.5 migration hoàn tất, Login form sẽ dùng username/password người dùng nhập để mở SQL connection tới `QLDSV`. Hiện tại code Python cũ vẫn còn tham chiếu `dbo.TaiKhoan`, vì vậy xóa bảng `TaiKhoan` trước khi migrate auth sẽ làm flow login cũ không hoạt động — đây là trạng thái chuyển tiếp đã biết.
+Chạy `.\.venv\Scripts\python.exe -m app.main`, nhập SQL Login và password hiện tại. Authentication không phụ thuộc `dbo.TaiKhoan`; account/password UI còn chờ các migration Epic 1.6/1.7 như mô tả ở trên.
 
 ## Cấu trúc chính
 

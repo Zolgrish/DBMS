@@ -1,93 +1,84 @@
 """Database access for dbo.TaiKhoan."""
 
-from app.config.database import get_connection
+from app.utils import session
 from app.models.user import User
 
 
 class AccountRepository:
-    def find_by_credentials(self, username: str, password: str) -> User | None:
-        """Return a matching account, or None when credentials do not match."""
-        connection = get_connection()
-        try:
-            row = connection.cursor().execute(
-                """
-                SELECT TENDANGNHAP, VAITRO, MASV, MAGV, TRANGTHAI
-                FROM dbo.TaiKhoan
-                WHERE TENDANGNHAP = ? AND MATKHAU = ?
-                """,
-                username,
-                password,
-            ).fetchone()
-        finally:
-            connection.close()
-
-        if row is None:
-            return None
-
-        return User(
-            username=str(row[0]).strip(),
-            role=str(row[1]).strip(),
-            masv=str(row[2]).strip() if row[2] is not None else None,
-            magv=str(row[3]).strip() if row[3] is not None else None,
-            active=bool(row[4]),
-        )
-
     def find_all_accounts(self) -> list[User]:
-        connection = get_connection()
-        try:
-            rows = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            rows = cursor.execute(
                 """
-                SELECT TENDANGNHAP, VAITRO, MASV, MAGV, TRANGTHAI
-                FROM dbo.TaiKhoan
-                ORDER BY TENDANGNHAP
+                SELECT
+                    tk.TENDANGNHAP,
+                    tk.VAITRO,
+                    tk.MASV,
+                    tk.MAGV,
+                    tk.TRANGTHAI,
+                    sv.HO,
+                    sv.TEN,
+                    gv.HO,
+                    gv.TEN
+                FROM dbo.TaiKhoan AS tk
+                LEFT JOIN dbo.Sinhvien AS sv ON sv.MASV = tk.MASV
+                LEFT JOIN dbo.Giangvien AS gv ON gv.MAGV = tk.MAGV
+                ORDER BY tk.TENDANGNHAP
                 """
             ).fetchall()
-        finally:
-            connection.close()
 
-        return [
-            User(
-                username=str(row[0]).strip(),
-                role=str(row[1]).strip(),
-                masv=str(row[2]).strip() if row[2] is not None else None,
-                magv=str(row[3]).strip() if row[3] is not None else None,
-                active=bool(row[4]),
+        accounts: list[User] = []
+        for row in rows:
+            role = str(row[1]).strip()
+            if role == "SinhVien":
+                full_name = self._join_name(row[5], row[6])
+            elif role == "GiangVien":
+                full_name = self._join_name(row[7], row[8])
+            else:
+                full_name = "Quản trị viên"
+
+            accounts.append(
+                User(
+                    username=str(row[0]).strip(),
+                    role=role,
+                    masv=str(row[2]).strip() if row[2] is not None else None,
+                    magv=str(row[3]).strip() if row[3] is not None else None,
+                    active=bool(row[4]),
+                    full_name=full_name,
+                )
             )
-            for row in rows
-        ]
+        return accounts
+
+    @staticmethod
+    def _join_name(last_name, first_name) -> str:
+        return " ".join(
+            str(part).strip()
+            for part in (last_name, first_name)
+            if part is not None and str(part).strip()
+        )
 
     def exists_username(self, username: str) -> bool:
-        connection = get_connection()
-        try:
-            row = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            row = cursor.execute(
                 "SELECT 1 FROM dbo.TaiKhoan WHERE TENDANGNHAP = ?",
                 username,
             ).fetchone()
             return row is not None
-        finally:
-            connection.close()
 
     def student_exists(self, masv: str) -> bool:
-        connection = get_connection()
-        try:
-            row = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            row = cursor.execute(
                 "SELECT 1 FROM dbo.Sinhvien WHERE MASV = ?",
                 masv,
             ).fetchone()
             return row is not None
-        finally:
-            connection.close()
 
     def lecturer_exists(self, magv: str) -> bool:
-        connection = get_connection()
-        try:
-            row = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            row = cursor.execute(
                 "SELECT 1 FROM dbo.Giangvien WHERE MAGV = ?",
                 magv,
             ).fetchone()
             return row is not None
-        finally:
-            connection.close()
 
     def create_account(
         self,
@@ -97,9 +88,8 @@ class AccountRepository:
         masv: str | None = None,
         magv: str | None = None,
     ) -> None:
-        connection = get_connection()
-        try:
-            connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            cursor.execute(
                 """
                 INSERT INTO dbo.TaiKhoan (TENDANGNHAP, MATKHAU, VAITRO, MASV, MAGV)
                 VALUES (?, ?, ?, ?, ?)
@@ -110,12 +100,6 @@ class AccountRepository:
                 masv,
                 magv,
             )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def update_account(
         self,
@@ -124,9 +108,8 @@ class AccountRepository:
         masv: str | None,
         magv: str | None,
     ) -> bool:
-        connection = get_connection()
-        try:
-            cursor = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            cursor = cursor.execute(
                 """
                 UPDATE dbo.TaiKhoan
                 SET VAITRO = ?, MASV = ?, MAGV = ?
@@ -137,29 +120,16 @@ class AccountRepository:
                 magv,
                 username,
             )
-            connection.commit()
             return cursor.rowcount > 0
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def update_account_status(self, username: str, status: bool) -> bool:
-        connection = get_connection()
-        try:
-            cursor = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            cursor = cursor.execute(
                 "UPDATE dbo.TaiKhoan SET TRANGTHAI = ? WHERE TENDANGNHAP = ?",
                 1 if status else 0,
                 username,
             )
-            connection.commit()
             return cursor.rowcount > 0
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()
 
     def update_password(
         self,
@@ -168,9 +138,8 @@ class AccountRepository:
         new_password: str,
     ) -> bool:
         """Change the password only when the supplied current password matches."""
-        connection = get_connection()
-        try:
-            cursor = connection.cursor().execute(
+        with session.qldsv_cursor() as cursor:
+            cursor = cursor.execute(
                 """
                 UPDATE dbo.TaiKhoan
                 SET MATKHAU = ?
@@ -180,10 +149,4 @@ class AccountRepository:
                 username,
                 current_password,
             )
-            connection.commit()
             return cursor.rowcount > 0
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
-            connection.close()

@@ -81,19 +81,30 @@ class LoginWindow(QMainWindow):
         self.setCentralWidget(container)
 
     def _login(self) -> None:
+        failure = None
         try:
             user = self._auth_service.login(
                 self.username_input.text(), self.password_input.text()
             )
         except AuthenticationError as error:
-            QMessageBox.warning(self, "Đăng nhập không thành công", str(error))
+            failure = error
+        finally:
             self.password_input.clear()
+
+        if failure is not None:
+            QMessageBox.warning(self, "Đăng nhập không thành công", str(failure))
             self.password_input.setFocus()
             return
 
-        self.password_input.clear()
         self.authenticated.emit(user)
 
     def prepare_for_logout(self) -> None:
         self.password_input.clear()
         self.username_input.setFocus()
+
+    def closeEvent(self, event) -> None:
+        from app.utils import session
+
+        self.password_input.clear()
+        session.clear_session()
+        super().closeEvent(event)

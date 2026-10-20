@@ -115,7 +115,18 @@ class AccountFormDialog(QDialog):
 
 
 class AccountManagementDialog(QDialog):
-    HEADERS = ("Username", "Role", "MASV", "MAGV", "Status")
+    HEADERS = (
+        "Tên đăng nhập",
+        "Họ và tên",
+        "Vai trò",
+        "Mã SV/GV",
+        "Trạng thái",
+    )
+    ROLE_LABELS = {
+        "Admin": "Admin",
+        "SinhVien": "Sinh viên",
+        "GiangVien": "Giảng viên",
+    }
 
     def __init__(
         self,
@@ -186,9 +197,9 @@ class AccountManagementDialog(QDialog):
         for row, account in enumerate(self._accounts):
             values = (
                 account.username,
-                account.role,
-                account.masv or "",
-                account.magv or "",
+                account.full_name or "—",
+                self.ROLE_LABELS.get(account.role, account.role),
+                account.masv or account.magv or "—",
                 "Đang hoạt động" if account.active else "Đã khóa",
             )
             for column, value in enumerate(values):
