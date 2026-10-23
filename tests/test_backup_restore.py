@@ -19,6 +19,7 @@ from app.services.backup_restore_service import BackupRestoreError, BackupRestor
 from app.ui.admin_dashboard import AdminDashboard
 from app.ui.backup_restore import BackupRestoreDialog
 from app.ui.student_dashboard import StudentDashboard
+from app.ui.lecturer_dashboard import LecturerDashboard
 from app.utils import session
 
 
@@ -104,6 +105,22 @@ class BackupRestoreTests(unittest.TestCase):
             with self.subTest(operation=operation):
                 with self.assertRaises(PermissionError):
                     operation()
+        self.assertEqual(self.repository.calls, [])
+
+    def test_lecturer_cannot_use_backup_service_or_ui(self) -> None:
+        user = User("GV00000002", "GiangVien", None, "GV00000002", True)
+        session.set_current_user(user)
+        dashboard = LecturerDashboard(user)
+        self.addCleanup(dashboard.close)
+        self.assertNotIn("Sao lưu / Phục hồi", [b.text() for b in dashboard.findChildren(QPushButton)])
+        for operation in (self.service.configured_directory, self.service.list_backups,
+                          self.service.backup_database, lambda: self.service.restore_database("missing.bak")):
+            with self.assertRaises(PermissionError):
+                operation()
+        dialog = BackupRestoreDialog(self.service)
+        self.addCleanup(dialog.close)
+        with patch.object(QMessageBox, "warning"):
+            dialog._create_backup()
         self.assertEqual(self.repository.calls, [])
 
     def test_generated_backup_filename_has_timestamp_and_bak_extension(self) -> None:

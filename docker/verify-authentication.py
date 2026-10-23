@@ -18,10 +18,12 @@ import pyodbc
 from app.config.database import open_sql_connection
 from app.repositories.account_repository import AccountRepository
 from app.services.auth_service import AuthService
+from app.services.account_service import AccountService
 from app.utils import session
 
 
-STUDENT = "SV00000002"
+STUDENT = os.getenv("QLDSV_VERIFY_STUDENT", "SV00000002")
+LECTURER = os.getenv("QLDSV_VERIFY_LECTURER", "GV00000002")
 
 
 def query(connection, sql, *parameters):
@@ -76,8 +78,10 @@ def assert_session_identity(name, role):
 
 def main():
     admin = os.getenv("QLDSV_ADMIN_LOGIN", "GV00000001")
+    if not os.getenv("QLDSV_ADMIN_PASSWORD") and not sys.stdin.isatty():
+        raise RuntimeError("BLOCKED: current Admin password unavailable; no guessing/reset or sa substitution.")
     current_password = os.getenv("QLDSV_ADMIN_PASSWORD") or getpass.getpass("Current Admin SQL password: ")
-    temporary_admin = "__AUTH15_" + secrets.token_hex(8)
+    temporary_admin = os.getenv("QLDSV_VERIFY_ADMIN", "GV00000003")
     temporary_password = "Auth15#Aa9!" + secrets.token_hex(16)
     control = None
     created = []
@@ -92,13 +96,17 @@ def main():
         check(tuple(master_rows[0]) == (admin, "master"), "Admin master principal mismatch")
         assert_absent(control, STUDENT)
         assert_absent(control, temporary_admin)
+        assert_absent(control, LECTURER)
+        for magv in (temporary_admin, LECTURER):
+            check(query(control, "SELECT 1 FROM dbo.Giangvien WHERE MAGV=?;", magv), "Seed MAGV is missing")
         check(query(control, "SELECT OBJECT_ID(N'dbo.TaiKhoan',N'U');")[0][0] is None, "TaiKhoan unexpectedly exists")
         print("PASS bootstrap Admin: application login, identity SP, repository QLDSV and master principals")
 
         query(control, "EXEC dbo.sp_TaoTaiKhoan @LoginName=?, @Role=?, @Password=?;",
               temporary_admin, "QLDSV_ADMIN", temporary_password)
         created.append(temporary_admin)
-        AuthService().login(temporary_admin, temporary_password)
+        user = AuthService().login(temporary_admin, temporary_password)
+        check(user.magv == temporary_admin and user.masv is None, "Admin MAGV mismatch")
         temporary_password = ""
         assert_session_identity(temporary_admin, "Admin")
         check(AccountRepository().student_exists(STUDENT), "Admin repository read failed")
@@ -109,7 +117,37 @@ def main():
         delete(control, temporary_admin)
         created.remove(temporary_admin)
         assert_absent(control, temporary_admin)
+        assert_absent(control, LECTURER)
         print("PASS delegated Admin: app login and logout physically close QLDSV + master sessions")
+
+        query(control, "EXEC dbo.sp_TaoTaiKhoan @LoginName=?, @Role=?;", LECTURER, "QLDSV_GIANGVIEN")
+        created.append(LECTURER)
+        user = AuthService().login(LECTURER, "Qldsv@123456")
+        assert_session_identity(LECTURER, "GiangVien")
+        check(user.magv == LECTURER and user.masv is None, "Lecturer trusted MAGV mismatch")
+        try:
+            session.require_master_connection()
+        except session.SessionRequiredError:
+            pass
+        else:
+            raise RuntimeError("Lecturer unexpectedly owns master")
+        for operation in (AccountService().find_all_accounts,
+                          lambda: AccountService().create_lecturer_account(LECTURER),
+                          lambda: AccountService().delete_account(LECTURER)):
+            try:
+                operation()
+            except PermissionError:
+                pass
+            else:
+                raise RuntimeError("Lecturer gained account-management access")
+        denied(AccountRepository().find_all_accounts, 52001)
+        denied(lambda: delete(control, LECTURER), 52015)
+        session.clear_session()
+        session.clear_session()
+        delete(control, LECTURER)
+        created.remove(LECTURER)
+        assert_absent(control, LECTURER)
+        print("PASS Lecturer: MAGV, SQL identity, no master/account access, physical logout")
 
         query(control, "EXEC dbo.sp_TaoTaiKhoan @LoginName=?, @Role=?;", STUDENT, "QLDSV_SINHVIEN")
         created.append(STUDENT)
@@ -157,8 +195,8 @@ SELECT ISNULL(IS_SRVROLEMEMBER(N'QLDSV_ACCOUNT_ADMIN'),-1),
         created.remove(STUDENT)
         assert_absent(control, STUDENT)
         print("PASS Student: app principal/MASV, self scores, direct SELECT/DML denied, physical logout")
-        check(tuple(query(control, "SELECT OBJECT_ID(N'dbo.TaiKhoan',N'U'), DATABASE_PRINCIPAL_ID(N'QLDSV_GIANGVIEN');")[0]) == (None, None),
-              "Unexpected legacy table/business role")
+        check(query(control, "SELECT OBJECT_ID(N'dbo.TaiKhoan',N'U');")[0][0] is None,
+              "Unexpected legacy account table")
         print("PASS Epic 1.5 real-principal verification; disposable principals removed")
     finally:
         current_password = temporary_password = ""
@@ -176,6 +214,9 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
+        if not os.getenv("QLDSV_ADMIN_PASSWORD") and not sys.stdin.isatty():
+            print("BLOCKED: current Admin password unavailable; no guessing/reset or sa substitution.", file=sys.stderr)
+            raise SystemExit(2) from None
         # Driver diagnostics can include connection details; never echo them.
         print("FAIL Epic 1.5 verification; check current Admin credentials, target and disposable account availability.", file=sys.stderr)
         raise SystemExit(1) from None

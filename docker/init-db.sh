@@ -115,6 +115,7 @@ run_sql_file "seedData.sql"
 # Epic 1.3 is required; security SPs remain optional until Epic 1.4.
 run_security
 run_optional_sql_file "StoredProcedures_Security.sql"
+run_sql_file "StoredProcedures_Lecturer.sql"
 
 echo "[db-init] Verifying QLDSV objects ..."
 sqlcmd_sa -d QLDSV -Q "SET NOCOUNT ON; SELECT name AS TableName FROM sys.tables WHERE name IN (N'Lop',N'Sinhvien',N'Giangvien',N'Monhoc',N'Diem',N'PhanCong') ORDER BY name; SELECT name AS ProcedureName FROM sys.procedures WHERE name LIKE N'sp[_]%' ORDER BY name;"
