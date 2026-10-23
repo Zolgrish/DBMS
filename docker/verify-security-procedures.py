@@ -3,12 +3,12 @@
 python docker/verify-security-procedures.py
 Current bootstrap Admin password: QLDSV_ADMIN_PASSWORD or a hidden prompt.
 Reuses Epic 1.3's SQLCMD transport; never imports application auth code.
-Requires unused seed principal SV00000002; existing business rows are untouched.
-Drift/locking tests insert and finally remove uniquely named disposable Students.
+Requires unused seed principals SV00000002 and GV00000002; seed rows are untouched.
+Drift/locking tests insert and finally remove uniquely named disposable Students and staff Giangvien rows.
 All temporary passwords are in memory/stdin/environment, never command argv.
 """
 
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 import getpass
 import importlib.util
 import os
@@ -22,7 +22,8 @@ import threading
 spec = importlib.util.spec_from_file_location("security_base", Path(__file__).with_name("verify-security.py"))
 base = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
-STUDENT = "SV00000002"
+STUDENT = os.getenv("QLDSV_VERIFY_STUDENT", "SV00000002")
+LECTURER = os.getenv("QLDSV_VERIFY_LECTURER", "GV00000002")
 PREFIX = "__SEC14_" + secrets.token_hex(8)
 
 
@@ -81,6 +82,33 @@ IF ISNULL(IS_SRVROLEMEMBER(N'QLDSV_ACCOUNT_ADMIN'),-1)<>1
     THROW 52102, 'Delegated Admin capability mismatch.', 1;
 """, "QLDSV_ADMIN", login))
     identity(login, password, "QLDSV_ADMIN")
+
+
+def unrelated_role_identity(admin, admin_password, lecturer, password):
+    """Only our disposable Lecturer is temporarily added to a permissionless role."""
+    identity(lecturer, password, "QLDSV_GIANGVIEN")
+    extra_role = PREFIX + "_extra_role"
+    base.sql(admin, admin_password, f"""
+IF DATABASE_PRINCIPAL_ID({base.literal(extra_role)}) IS NOT NULL
+    THROW 52110, 'Disposable role collision; existing role was not changed.', 1;
+""")
+    try:
+        base.sql(admin, admin_password, f"CREATE ROLE {base.identifier(extra_role)} AUTHORIZATION dbo;")
+        base.sql(admin, admin_password, f"ALTER ROLE {base.identifier(extra_role)} ADD MEMBER {base.identifier(lecturer)};")
+        rejected("Lecturer with unrelated direct database role", lecturer, password,
+                 "EXEC dbo.sp_ThongTinDangNhap;", 52021)
+        base.sql(admin, admin_password, f"ALTER ROLE {base.identifier(extra_role)} DROP MEMBER {base.identifier(lecturer)};")
+        identity(lecturer, password, "QLDSV_GIANGVIEN")
+    finally:
+        base.sql(admin, admin_password, f"""
+IF EXISTS (SELECT 1 FROM sys.database_role_members
+           WHERE role_principal_id=DATABASE_PRINCIPAL_ID({base.literal(extra_role)})
+             AND member_principal_id=DATABASE_PRINCIPAL_ID({base.literal(lecturer)}))
+    ALTER ROLE {base.identifier(extra_role)} DROP MEMBER {base.identifier(lecturer)};
+IF DATABASE_PRINCIPAL_ID({base.literal(extra_role)}) IS NOT NULL
+    DROP ROLE {base.identifier(extra_role)};
+""")
+    print("PASS runtime identity: unrelated direct role rejected (52021), identity restored after removal, role cleaned", flush=True)
 
 
 def session_batch(process, query, expected=None):
@@ -154,6 +182,26 @@ IF EXISTS(SELECT 1 FROM dbo.Sinhvien WHERE MASV={base.literal(masv)})
         absent(masv)
 
 
+@contextmanager
+def disposable_lecturer_row(admin, password, magv=None):
+    magv = magv or ("G" + secrets.token_hex(5)[:9].upper())
+    absent(magv)
+    base.sql(admin, password, f"""
+IF EXISTS(SELECT 1 FROM dbo.Giangvien WHERE MAGV={base.literal(magv)})
+    THROW 52110, 'Disposable MAGV collision; existing row was not changed.', 1;
+INSERT dbo.Giangvien(MAGV,HO,TEN,PHAI) VALUES({base.literal(magv)},N'Verifier',N'Staff',1);
+""")
+    try:
+        yield magv
+    finally:
+        # Preserve identity if principal cleanup failed; never orphan an account.
+        base.sql(admin, password, f"""
+IF SUSER_ID({base.literal(magv)}) IS NOT NULL OR DATABASE_PRINCIPAL_ID({base.literal(magv)}) IS NOT NULL
+    THROW 52110, 'Disposable staff principal remains; resolve before deleting its entity.', 1;
+DELETE dbo.Giangvien WHERE MAGV={base.literal(magv)};
+""")
+
+
 def security_preflight(expected_error=None):
     # Security.sql alone: expected rejection must not recreate common SPs.
     env = os.environ.copy()
@@ -219,8 +267,11 @@ IF SUSER_ID({base.literal(unmapped)}) IS NOT NULL DROP LOGIN {base.identifier(un
 
 
 def disabled_delete(admin, password):
-    name = PREFIX + "_disabled"
-    absent(name)
+    with disposable_lecturer_row(admin, password) as name:
+        disabled_delete_account(admin, password, name)
+
+
+def disabled_delete_account(admin, password, name):
     try:
         base.sql(admin, password, create_query(name, "QLDSV_ADMIN", "Disabled#"+secrets.token_hex(20)+"!"))
         ids = base.sql("sa", None, f"SET NOCOUNT ON; SELECT SUSER_ID({base.literal(name)}),DATABASE_PRINCIPAL_ID({base.literal(name)});", sa=True)
@@ -289,19 +340,32 @@ IF EXISTS(SELECT 1 FROM sys.server_role_members WHERE member_principal_id={login
 
 def student_checks(admin, admin_password):
     identity(STUDENT, "123456", "QLDSV_SINHVIEN")
-    base.sql(STUDENT, "123456", """
+    expected = base.sql(admin, admin_password, f"""
 SET NOCOUNT ON;
-IF ISNULL(IS_SRVROLEMEMBER(N'QLDSV_ACCOUNT_ADMIN'),-1)<>0
- OR ISNULL(IS_SRVROLEMEMBER(N'dbcreator'),-1)<>0
- OR EXISTS(SELECT 1 FROM sys.server_principals WHERE type='R' AND name<>N'public'
+SELECT COUNT(*),COALESCE(CHECKSUM_AGG(BINARY_CHECKSUM(d.MAMH,d.LAN,d.DIEM)),0)
+FROM dbo.Diem d JOIN dbo.Sinhvien s ON s.MASV=d.MASV
+WHERE d.MASV={base.literal(STUDENT)} AND s.NGHIHOC=0;
+""").stdout.strip()
+    count, checksum = map(int, expected.split())
+    seed_check = ""
+    if STUDENT == "SV00000002":
+        seed_check = """
+IF (SELECT COUNT(*) FROM @d)<>3 OR EXISTS(
+ SELECT MAMH,LAN,DIEM FROM @d EXCEPT
+ SELECT * FROM (VALUES(N'CSDL1',1,4.0),(N'CSDL1',2,7.0),(N'CTDL1',1,2.0)) e(MAMH,LAN,DIEM))
+    THROW 52103, 'Raw attempts differ from expected seed data.', 1;
+"""
+    base.sql(STUDENT, "123456", f"""
+SET NOCOUNT ON;
+IF EXISTS(SELECT 1 FROM sys.server_principals WHERE type='R' AND name<>N'public'
            AND ISNULL(IS_SRVROLEMEMBER(name),-1)<>0)
     THROW 52103, 'Student has a server administration role.', 1;
 DECLARE @d TABLE(MAMH nchar(5),TENMH nvarchar(40),LAN smallint,DIEM float);
 INSERT @d EXEC dbo.sp_SinhVien_XemDiem;
-IF (SELECT COUNT(*) FROM @d)<>3 OR EXISTS(
- SELECT MAMH,LAN,DIEM FROM @d EXCEPT
- SELECT * FROM (VALUES(N'CSDL1',1,4.0),(N'CSDL1',2,7.0),(N'CTDL1',1,2.0)) e(MAMH,LAN,DIEM))
-    THROW 52103, 'Raw attempts differ from the expected SV00000002 data.', 1;
+IF (SELECT COUNT(*) FROM @d)<>{count}
+ OR (SELECT COALESCE(CHECKSUM_AGG(BINARY_CHECKSUM(MAMH,LAN,DIEM)),0) FROM @d)<>{checksum}
+    THROW 52103, 'Own raw attempts differ from trusted data.', 1;
+{seed_check}
 """)
     rejected("Student direct Diem SELECT", STUDENT, "123456", "SELECT * FROM dbo.Diem;", 229)
     rejected("Student account creation", STUDENT, "123456", create_query(PREFIX+"_forbidden", "QLDSV_ADMIN", "Unused#123456!"), 229)
@@ -309,11 +373,41 @@ IF (SELECT COUNT(*) FROM @d)<>3 OR EXISTS(
     rejected("Student supplies another MASV", STUDENT, "123456", "EXEC dbo.sp_SinhVien_XemDiem @MASV=N'SV00000001';", 8146)
     rejected("Student supplies another Login identity", STUDENT, "123456", "EXEC dbo.sp_ThongTinDangNhap @LoginName=N'SV00000001';", 8146)
     rejected("Admin invokes Student-only query", admin, admin_password, "EXEC dbo.sp_SinhVien_XemDiem;", 52022)
-    base.sql("sa", None, """
-IF NOT EXISTS(SELECT 1 FROM sys.sql_logins WHERE name=N'SV00000002' AND is_policy_checked=0 AND is_expiration_checked=0)
+    base.sql("sa", None, f"""
+IF NOT EXISTS(SELECT 1 FROM sys.sql_logins WHERE name={base.literal(STUDENT)} AND is_policy_checked=0 AND is_expiration_checked=0)
     THROW 52103, 'Student default-password policy mismatch.', 1;
 """, sa=True)
-    print("PASS Student: SQL identity, default password, three exact raw attempts, same-owner chain across dbo SELECT DENY", flush=True)
+    print("PASS Student: SQL identity, default password, own raw attempts, same-owner chain across dbo SELECT DENY", flush=True)
+
+
+def lecturer_checks(login, password):
+    identity(login, password, "QLDSV_GIANGVIEN")
+    base.sql(login, password, """
+IF EXISTS(SELECT 1 FROM sys.server_principals WHERE type='R' AND name<>N'public'
+          AND ISNULL(IS_SRVROLEMEMBER(name),-1)<>0)
+ OR ISNULL(HAS_PERMS_BY_NAME(NULL,NULL,'ALTER ANY LOGIN'),-1)<>0
+ OR ISNULL(HAS_PERMS_BY_NAME(NULL,NULL,'CREATE ANY DATABASE'),-1)<>0
+ OR ISNULL(HAS_PERMS_BY_NAME(DB_NAME(),'DATABASE','BACKUP DATABASE'),-1)<>0
+    THROW 52103, 'Lecturer has server administration/backup permission.', 1;
+""")
+    for table in ("Lop", "Sinhvien", "Giangvien", "Monhoc", "Diem", "PhanCong"):
+        rejected("Lecturer direct " + table, login, password, f"SELECT TOP (0) * FROM dbo.{table};", 229)
+    for query in ("INSERT dbo.Lop(MALOP,TENLOP) SELECT N'ZZSEC001',N'Probe' WHERE 1=0;",
+                  "UPDATE dbo.Diem SET DIEM=0 WHERE 1=0;", "DELETE dbo.Diem WHERE 1=0;",
+                  "EXEC dbo.sp_GetLop;", "EXEC dbo.sp_GetMonHoc;", "EXEC dbo.sp_GetGiangVien;",
+                  "EXEC dbo.sp_GetSinhVienByLop @MALOP=N'CNTT01';",
+                  "EXEC dbo.sp_GetSinhVienByMa @MASV=N'SV00000002';",
+                  "EXEC dbo.sp_CheckMaSV @MASV=N'SV00000002';",
+                  "EXEC dbo.sp_CheckMaLop @MALOP=N'CNTT01';",
+                  "EXEC dbo.sp_CheckMaMH @MAMH=N'CSDL1';", "EXEC dbo.sp_GetActiveStudents;",
+                  "EXEC dbo.sp_TaoTaiKhoan @LoginName=NULL,@Role=NULL;",
+                  "EXEC dbo.sp_XoaTaiKhoan @LoginName=NULL;", "EXEC dbo.sp_SinhVien_XemDiem;"):
+        rejected("Lecturer restricted operation", login, password, query, 229)
+    base.sql("sa", None, f"""
+IF NOT EXISTS(SELECT 1 FROM sys.sql_logins WHERE name={base.literal(login)} AND is_policy_checked=1)
+    THROW 52103, 'Lecturer password policy mismatch.', 1;
+""", sa=True)
+    print("PASS Lecturer: real identity, policy ON, no server roles/admin privileges, direct data/common/account/own-score denials", flush=True)
 
 
 def active_delete(admin, password, child, child_password):
@@ -334,7 +428,7 @@ IF @u IS NULL OR @l IS NULL
     print("PASS active-session rollback: Login/User/SID/database+server roles intact; deletion succeeds after own client closes", flush=True)
 
 
-def negative_inputs(admin, password):
+def negative_inputs(admin, password, valid_magv):
     cases = [
         ("invalid business role", PREFIX+"_invalid", "Admin", None, 52003),
         ("arbitrary server role", PREFIX+"_invalid", "sysadmin", None, 52003),
@@ -346,8 +440,10 @@ def negative_inputs(admin, password):
         ("reserved principal", "sa", "QLDSV_ADMIN", None, 52002),
         ("missing Student MASV", "ZZ99999999", "QLDSV_SINHVIEN", None, 52007),
         ("Student password override", STUDENT, "QLDSV_SINHVIEN", "Conflicting#123!", 52006),
-        ("missing Admin password", PREFIX+"_invalid", "QLDSV_ADMIN", None, 52006),
-        ("weak Admin password", PREFIX+"_weak", "QLDSV_ADMIN", "123456", 52009),
+        ("missing Admin MAGV", "ZZ99999999", "QLDSV_ADMIN", None, 52017),
+        ("missing Lecturer MAGV", "ZZ99999999", "QLDSV_GIANGVIEN", None, 52017),
+        ("weak Admin password", valid_magv, "QLDSV_ADMIN", "123456", 52009),
+        ("weak Lecturer password", valid_magv, "QLDSV_GIANGVIEN", "123456", 52009),
     ]
     for label, name, role, secret, error in cases:
         rejected(label, admin, password, create_query(name, role, secret), error)
@@ -356,19 +452,24 @@ def negative_inputs(admin, password):
 
 
 def main():
-    bootstrap_password = os.environ.get("QLDSV_ADMIN_PASSWORD") or getpass.getpass("Current Admin SQL password: ")
-    admin = PREFIX+"_admin"
+    bootstrap_password = base.current_admin_password()
+    admin = "G"+secrets.token_hex(5)[:9].upper()
     password = "Admin#"+secrets.token_hex(20)+"!"
-    child, failed = PREFIX+"_child", PREFIX+"_rollback"
-    orphan, alias, loose = PREFIX+"_orphan", PREFIX+"_alias", PREFIX+"_loose"
+    child, failed = "G"+secrets.token_hex(5)[:9].upper(), "G"+secrets.token_hex(5)[:9].upper()
+    orphan, alias, loose = "G"+secrets.token_hex(5)[:9].upper(), PREFIX+"_alias", "G"+secrets.token_hex(5)[:9].upper()
     sentinel = PREFIX+"_sentinel"
-    injected = PREFIX+"]; DROP TABLE dbo."+sentinel+";--"
+    injected = "Q'];--"+secrets.token_hex(2).upper()  # Valid 10-character MAGV containing SQL metacharacters.
     owned_student = False
     # Refuse to touch a pre-existing Student account (including mismatched SID).
-    absent(STUDENT, admin, child, failed, orphan, alias, loose, injected)
+    absent(STUDENT, LECTURER, admin, child, failed, orphan, alias, loose, injected)
     base.build_db_init()  # Fresh deployment image, once before test mutations.
     baseline = base.sql("sa", None, "SET NOCOUNT ON; SELECT COUNT(*),CHECKSUM_AGG(BINARY_CHECKSUM(MASV,MAMH,LAN,DIEM)) FROM dbo.Diem;", sa=True).stdout.strip()
+    fixtures = ExitStack()
+    owned_lecturer = False
     try:
+        for magv in (admin, child, failed, orphan, loose, injected):
+            fixtures.enter_context(disposable_lecturer_row(base.ADMIN, bootstrap_password, magv))
+        base.sql(base.ADMIN, bootstrap_password, f"IF NOT EXISTS(SELECT 1 FROM dbo.Giangvien WHERE MAGV={base.literal(LECTURER)}) THROW 52110,'Seed Lecturer is missing.',1;")
         # Run the procedure file twice under the real Admin, reapplying grants.
         for _ in range(2):
             base.sql(base.ADMIN, bootstrap_password, (base.ROOT/"database"/"StoredProcedures_Security.sql").read_text(encoding="utf-8"))
@@ -382,7 +483,19 @@ def main():
         owned_student = True  # Also clean up an unexpected partial creation.
         base.sql(admin, password, create_query(STUDENT, "QLDSV_SINHVIEN"))
         student_checks(admin, password)
-        negative_inputs(admin, password)
+        owned_lecturer = True
+        base.sql(admin, password, create_query(LECTURER, "QLDSV_GIANGVIEN"))
+        lecturer_checks(LECTURER, "Qldsv@123456")
+        base.sql(admin, password, delete_query(LECTURER))
+        owned_lecturer = False
+        absent(LECTURER)
+        # Blank password is server-defaulted for both staff roles.
+        for staff_role in ("QLDSV_ADMIN", "QLDSV_GIANGVIEN"):
+            base.sql(admin, password, create_query(child, staff_role, ""))
+            identity(child, "Qldsv@123456", staff_role)
+            base.sql(admin, password, delete_query(child))
+            absent(child)
+        negative_inputs(admin, password, failed)
         rejected("duplicate Login", admin, password, create_query(STUDENT, "QLDSV_SINHVIEN"), 52004)
         active_delete(admin, password, child, "Child#"+secrets.token_hex(20)+"!")
 
@@ -403,10 +516,28 @@ def main():
         rejected("delete mismatched User mapping", admin, password, delete_query(loose), 52011)
         base.sql(base.ADMIN, bootstrap_password, f"DROP USER {base.identifier(alias)}; CREATE USER {base.identifier(loose)} FOR LOGIN {base.identifier(loose)}; GRANT EXECUTE ON OBJECT::dbo.sp_ThongTinDangNhap TO {base.identifier(loose)};")
         rejected("no-role SQL identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
+        base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_GIANGVIEN ADD MEMBER {base.identifier(loose)};")
+        unrelated_role_identity(base.ADMIN, bootstrap_password, loose, password)
+        base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_GIANGVIEN DROP MEMBER {base.identifier(loose)};")
         base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_ADMIN ADD MEMBER {base.identifier(loose)}; ALTER ROLE QLDSV_SINHVIEN ADD MEMBER {base.identifier(loose)};")
         rejected("dual-role SQL identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
         rejected("dual-role account deletion", admin, password, delete_query(loose), 52012)
         rejected("dual-role Student query", loose, password, "EXEC dbo.sp_SinhVien_XemDiem;", 52022)
+        base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_GIANGVIEN ADD MEMBER {base.identifier(loose)};")
+        rejected("triple-role SQL identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
+        rejected("triple-role account deletion", admin, password, delete_query(loose), 52012)
+        rejected("triple-role caller account creation", loose, password, create_query(failed,"QLDSV_ADMIN"), 229)
+        # Every pair is rejected, including Lecturer+Student and Admin+Lecturer.
+        base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_ADMIN DROP MEMBER {base.identifier(loose)};")
+        rejected("Lecturer+Student identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
+        base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_SINHVIEN DROP MEMBER {base.identifier(loose)}; ALTER ROLE QLDSV_ADMIN ADD MEMBER {base.identifier(loose)};")
+        rejected("Admin+Lecturer identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
+        rejected("Admin+Lecturer account caller", loose, password, create_query(failed,"QLDSV_ADMIN"), 229)
+        security_preflight(51003)  # Ambiguous business identity must not be repaired.
+        base.sql(base.ADMIN, bootstrap_password, f"DROP USER {base.identifier(loose)}; DROP LOGIN {base.identifier(loose)}; DROP USER {base.identifier(orphan)};")
+        absent(loose, orphan, alias)
+
+
 
         # Quoted identifier and password literals must remain data.
         base.sql(base.ADMIN, bootstrap_password, f"CREATE TABLE dbo.{base.identifier(sentinel)}(id int); INSERT dbo.{base.identifier(sentinel)} VALUES(14);")
@@ -438,14 +569,19 @@ def main():
         absent(admin)
     finally:
         # Cleanup targets were verified absent at entry; never drop an account
-        # belonging to the user. No sessions are killed, no business rows touched.
+        # belonging to the user. No sessions are killed; seed rows stay intact. Disposable staff rows close last.
         targets=[injected,loose,alias,orphan,failed,child,admin]
+        if owned_lecturer:
+            targets.insert(0,LECTURER)
         if owned_student:
             targets.insert(0,STUDENT)
-        for name in targets:
-            base.sql(base.ADMIN,bootstrap_password,f"IF DATABASE_PRINCIPAL_ID({base.literal(name)}) IS NOT NULL DROP USER {base.identifier(name)}; IF SUSER_ID({base.literal(name)}) IS NOT NULL DROP LOGIN {base.identifier(name)};")
-        base.sql(base.ADMIN,bootstrap_password,f"IF OBJECT_ID({base.literal('dbo.'+sentinel)},N'U') IS NOT NULL DROP TABLE dbo.{base.identifier(sentinel)};")
-        absent(*targets)
+        try:
+            for name in targets:
+                base.sql(base.ADMIN,bootstrap_password,f"IF DATABASE_PRINCIPAL_ID({base.literal(name)}) IS NOT NULL DROP USER {base.identifier(name)}; IF SUSER_ID({base.literal(name)}) IS NOT NULL DROP LOGIN {base.identifier(name)};")
+            base.sql(base.ADMIN,bootstrap_password,f"IF OBJECT_ID({base.literal('dbo.'+sentinel)},N'U') IS NOT NULL DROP TABLE dbo.{base.identifier(sentinel)};")
+            absent(*targets)
+        finally:
+            fixtures.close()
     after=base.sql("sa",None,"SET NOCOUNT ON; SELECT COUNT(*),CHECKSUM_AGG(BINARY_CHECKSUM(MASV,MAMH,LAN,DIEM)) FROM dbo.Diem;",sa=True).stdout.strip()
     if baseline!=after:
         raise RuntimeError("Business score rows changed")

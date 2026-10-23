@@ -39,7 +39,7 @@ class AuthService:
             if len(rows) != 1 or len(rows[0]) != 3:
                 raise AuthenticationServiceError("SQL Server trả về danh tính không hợp lệ.")
             login_name, database_user, sql_role = rows[0]
-            roles = {"QLDSV_ADMIN": "Admin", "QLDSV_SINHVIEN": "SinhVien"}
+            roles = {"QLDSV_ADMIN": "Admin", "QLDSV_GIANGVIEN": "GiangVien", "QLDSV_SINHVIEN": "SinhVien"}
             if (
                 not isinstance(login_name, str) or not login_name.strip()
                 or not isinstance(database_user, str) or not database_user.strip()
@@ -51,7 +51,7 @@ class AuthService:
                 username=login_name,
                 role=role,
                 masv=database_user if role == "SinhVien" else None,
-                magv=None,
+                magv=database_user if role in {"Admin", "GiangVien"} else None,
                 active=True,
             )
             if role == "Admin":

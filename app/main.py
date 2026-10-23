@@ -14,6 +14,7 @@ from app.services.auth_service import AuthService
 from app.ui.admin_dashboard import AdminDashboard
 from app.ui.dashboard_common import DashboardWindow
 from app.ui.login import LoginWindow
+from app.ui.lecturer_dashboard import LecturerDashboard
 from app.ui.student_dashboard import StudentDashboard
 from app.utils import session
 
@@ -35,6 +36,8 @@ class ApplicationRouter(QObject):
     def open_dashboard(self, user: User) -> None:
         if user.role == "Admin":
             self.dashboard = AdminDashboard(user)
+        elif user.role == "GiangVien":
+            self.dashboard = LecturerDashboard(user)
         elif user.role == "SinhVien":
             self.dashboard = StudentDashboard(user)
         else:

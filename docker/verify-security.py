@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,8 +61,13 @@ def sql(login, password, query, *, sa=False, expect_success=True):
 
 
 def checked(query, role, login):
+    exclusive = "\n".join(
+        f"IF ISNULL(IS_ROLEMEMBER({literal(other)}),-1)<>0 THROW 51100, 'Ambiguous business role.', 1;"
+        for other in ("QLDSV_ADMIN", "QLDSV_GIANGVIEN", "QLDSV_SINHVIEN") if other != role
+    )
     return f"""
 SET NOCOUNT ON; SET XACT_ABORT ON;
+{exclusive}
 IF ORIGINAL_LOGIN() <> {literal(login)} OR SUSER_SNAME() <> {literal(login)}
    OR USER_NAME() <> {literal(login)}
     THROW 51100, 'Login/database user mapping mismatch.', 1;
@@ -179,8 +185,35 @@ def metadata_query(admin_role="QLDSV_ADMIN", student_role="QLDSV_SINHVIEN"):
 SET NOCOUNT ON;
 IF CONVERT(int,SERVERPROPERTY('IsIntegratedSecurityOnly')) <> 0
  OR OBJECT_ID(N'dbo.TaiKhoan',N'U') IS NOT NULL
- OR DATABASE_PRINCIPAL_ID(N'QLDSV_GIANGVIEN') IS NOT NULL
     THROW 51104, 'Authentication mode or legacy principal/table mismatch.', 1;
+IF (SELECT COUNT(*) FROM sys.database_principals
+    WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+      AND type='R' AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+    THROW 51104, 'Require three business roles owned by dbo.', 1;
+IF NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV={literal(ADMIN)})
+ OR NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV={literal(STUDENT)})
+    THROW 51104, 'Bootstrap principals must match MAGV/MASV entities.', 1;
+IF EXISTS (SELECT 1 FROM sys.database_principals u WHERE u.name IN ({literal(ADMIN)},{literal(STUDENT)})
+           AND (SELECT COUNT(*) FROM sys.database_role_members rm
+                JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+                WHERE rm.member_principal_id=u.principal_id
+                  AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))<>1)
+    THROW 51104, 'Bootstrap principal has ambiguous business roles.', 1;
+IF EXISTS (SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE (rm.member_principal_id=DATABASE_PRINCIPAL_ID({literal(ADMIN)}) AND r.name<>N'QLDSV_ADMIN')
+              OR (rm.member_principal_id=DATABASE_PRINCIPAL_ID({literal(STUDENT)}) AND r.name<>N'QLDSV_SINHVIEN'))
+    THROW 51104, 'Bootstrap principal has conflicting role membership.', 1;
+IF EXISTS (SELECT 1 FROM sys.server_role_members rm
+           JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
+           JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
+           WHERE r.name=N'QLDSV_ACCOUNT_ADMIN' AND NOT EXISTS (
+             SELECT 1 FROM sys.database_principals u WHERE u.name=m.name AND u.sid=m.sid AND u.type='S'
+             AND u.authentication_type=1 AND m.type='S' AND m.principal_id<>1
+             AND ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN',u.name),-1)=1
+             AND ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN',u.name),-1)=0
+             AND ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN',u.name),-1)=0))
+    THROW 51104, 'Invalid mapped technical-role Admin.', 1;
 IF NOT EXISTS (SELECT 1 FROM sys.sql_logins WHERE name={literal(ADMIN)} AND is_policy_checked=1)
     THROW 51104, 'Admin SQL Login must have CHECK_POLICY=ON.', 1;
 IF EXISTS (SELECT 1 FROM sys.server_role_members rm JOIN sys.server_principals p
@@ -214,7 +247,7 @@ WHERE p.grantee_principal_id=DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN');
 def metadata():
     result = sql("sa", None, metadata_query(), sa=True)
     print(result.stdout.strip())
-    print("PASS metadata: Mixed Mode, SID mappings, roles, Student denials; no TaiKhoan or QLDSV_GIANGVIEN")
+    print("PASS metadata: Mixed Mode, same-name SID mappings, three dbo-owned roles and Student denials; no TaiKhoan")
 
 
 def verify_backup_restore(password):
@@ -253,8 +286,8 @@ def verify_conflict_guards():
     # A rejected Security.sql rolls back that whole transaction; connection
     # closure is also a rollback safeguard if a preflight fails before TRY.
     bootstrap = (ROOT / "database" / "Security.sql").read_text(encoding="utf-8")
-    temporary = "__SEC13_" + secrets.token_hex(12)
-    other = temporary + "_other"
+    temporary = "Z" + secrets.token_hex(5)[:9].upper()
+    other = "Y" + secrets.token_hex(5)[:9].upper()
     password = "Collision#" + secrets.token_hex(20) + "!"
     create_logins = ""
     for name in (temporary, other):
@@ -263,7 +296,7 @@ def verify_conflict_guards():
     scenarios = [
         ("server principal type", f"USE master; BEGIN TRANSACTION; CREATE SERVER ROLE {identifier(temporary)} AUTHORIZATION sa;\n", "51002"),
         ("database SID mapping", "USE master; BEGIN TRANSACTION;\n" + create_logins
-         + f"USE QLDSV; CREATE USER {identifier(temporary)} FOR LOGIN {identifier(other)};\n", "51002"),
+         + f"USE QLDSV; INSERT dbo.Giangvien(MAGV,PHAI) VALUES({literal(temporary)},1); CREATE USER {identifier(temporary)} FOR LOGIN {identifier(other)};\n", "51002"),
     ]
     for description, setup, error in scenarios:
         query = bootstrap.replace("$(QLDSV_ADMIN_LOGIN_HEX)", hex_value(temporary))
@@ -275,7 +308,6 @@ def verify_conflict_guards():
         sql("sa", None, f"""
 IF SUSER_ID({literal(temporary)}) IS NOT NULL OR SUSER_ID({literal(other)}) IS NOT NULL
  OR DATABASE_PRINCIPAL_ID({literal(temporary)}) IS NOT NULL
- OR DATABASE_PRINCIPAL_ID(N'QLDSV_GIANGVIEN') IS NOT NULL
     THROW 51106, 'Conflict test did not roll back its disposable principals.', 1;
 """, sa=True)
         print("PASS collision rejected and rolled back: " + description)
@@ -315,7 +347,7 @@ def build_db_init():
 
 
 def verify_admin_policy_guard(admin_password):
-    temporary = "__SEC13_policy_" + secrets.token_hex(12)
+    temporary = "Z" + secrets.token_hex(5)[:9].upper()
     password = "Policy#" + secrets.token_hex(20) + "!"
     try:
         sql(ADMIN, admin_password, f"""
@@ -366,8 +398,17 @@ DECLARE @s nvarchar(max)=N'ALTER LOGIN {identifier(STUDENT)} WITH PASSWORD=N'''
 """)
 
 
+def current_admin_password():
+    password = os.environ.get("QLDSV_ADMIN_PASSWORD")
+    if password:
+        return password
+    if not sys.stdin.isatty():
+        raise RuntimeError("BLOCKED: current Admin password unavailable; no guessing/reset or sa substitution.")
+    return getpass.getpass("Current Admin SQL password: ")
+
+
 def main():
-    admin_password = os.environ.get("QLDSV_ADMIN_PASSWORD") or getpass.getpass("Current Admin SQL password: ")
+    admin_password = current_admin_password()
     student_password = os.environ.get("QLDSV_STUDENT_PASSWORD", "123456")
     metadata()
     verify_admin(admin_password)
@@ -405,7 +446,7 @@ def main():
     metadata()
     print("PASS cleanup: Student password restored; no permanent test objects/principals")
     print("Epic 1.4 procedure checks: python docker/verify-security-procedures.py")
-    print("DEFERRED: application SQL-credential login (Epic 1.5)")
+    print("Application three-role verifiers: verify-authentication.py and verify-account-management.py")
 
 
 if __name__ == "__main__":

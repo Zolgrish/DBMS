@@ -1,4 +1,4 @@
-"""Admin account list and account create/edit/status actions."""
+"""Admin SQL account list, creation and confirmed deletion."""
 
 from collections.abc import Callable
 
@@ -27,13 +27,11 @@ class AccountFormDialog(QDialog):
     def __init__(
         self,
         title: str,
-        on_save: Callable[[dict[str, str]], None],
-        account: User | None = None,
+        on_save: Callable[[dict[str, str | None]], None],
         parent=None,
     ) -> None:
         super().__init__(parent)
         self._on_save = on_save
-        self._is_create = account is None
         self.setWindowTitle(title)
         self.setMinimumWidth(430)
         self.setStyleSheet(DIALOG_STYLE)
@@ -42,36 +40,45 @@ class AccountFormDialog(QDialog):
         form = QFormLayout()
         form.setSpacing(12)
 
-        self.username_input = QLineEdit(account.username if account else "")
-        self.username_input.setMaxLength(50)
-        self.username_input.setObjectName("accountUsernameInput")
-        self.username_input.setEnabled(self._is_create)
-        form.addRow("Username", self.username_input)
-
         self.password_input = QLineEdit()
-        self.password_input.setMaxLength(255)
+        self.password_input.setMaxLength(128)
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setObjectName("accountPasswordInput")
-        self.password_input.setVisible(self._is_create)
-        if self._is_create:
-            form.addRow("Mật khẩu", self.password_input)
+        form.addRow("Mật khẩu", self.password_input)
+        self.password_input.setPlaceholderText(
+            "Để trống để dùng mật khẩu mặc định; mật khẩu tự đặt phải đáp ứng SQL Server CHECK_POLICY"
+        )
+        self.staff_password_hint = QLabel(
+            "Nếu không nhập mật khẩu, hệ thống sẽ dùng mật khẩu mặc định: Qldsv@123456."
+        )
+        self.staff_password_hint.setWordWrap(True)
+        form.addRow(self.staff_password_hint)
+        self.student_password_hint = QLabel("Mật khẩu mặc định: 123456 (SQL Server cấp)")
+        form.addRow(self.student_password_hint)
 
         self.role_combo = QComboBox()
-        self.role_combo.addItems(["Admin", "SinhVien", "GiangVien"])
+        self.role_combo.addItems(["Admin", "GiangVien", "SinhVien"])
         self.role_combo.setObjectName("accountRoleCombo")
-        if account:
-            self.role_combo.setCurrentText(account.role)
         form.addRow("Vai trò", self.role_combo)
 
-        self.masv_input = QLineEdit(account.masv or "" if account else "")
+        self.masv_input = QLineEdit()
         self.masv_input.setMaxLength(10)
         self.masv_input.setObjectName("accountMasvInput")
-        form.addRow("MASV", self.masv_input)
+        self.masv_input.textChanged.connect(
+            lambda text: self._uppercase_identifier(self.masv_input, text)
+        )
+        self.masv_label = QLabel("MASV")
+        form.addRow(self.masv_label, self.masv_input)
 
-        self.magv_input = QLineEdit(account.magv or "" if account else "")
+        self.magv_input = QLineEdit()
         self.magv_input.setMaxLength(10)
         self.magv_input.setObjectName("accountMagvInput")
-        form.addRow("MAGV", self.magv_input)
+        self.magv_input.textChanged.connect(
+            lambda text: self._uppercase_identifier(self.magv_input, text)
+        )
+        self.magv_input.setPlaceholderText("MAGV đã có trong danh sách giảng viên")
+        self.magv_label = QLabel("MAGV")
+        form.addRow(self.magv_label, self.magv_input)
 
         buttons = QHBoxLayout()
         buttons.addStretch()
@@ -88,23 +95,40 @@ class AccountFormDialog(QDialog):
         self.role_combo.currentTextChanged.connect(self._update_role_fields)
         self._update_role_fields(self.role_combo.currentText())
 
+    @staticmethod
+    def _uppercase_identifier(editor: QLineEdit, text: str) -> None:
+        uppercase = text.upper()
+        if uppercase == text:
+            return
+        cursor = editor.cursorPosition()
+        editor.setText(uppercase)
+        editor.setCursorPosition(min(cursor, len(uppercase)))
+
     def _update_role_fields(self, role: str) -> None:
-        self.masv_input.setEnabled(role == "SinhVien")
-        self.magv_input.setEnabled(role == "GiangVien")
-        if role != "SinhVien":
-            self.masv_input.clear()
-        if role != "GiangVien":
+        student = role == "SinhVien"
+        self.masv_input.setEnabled(student)
+        self.magv_input.setEnabled(not student)
+        self.masv_input.setVisible(student)
+        self.masv_label.setVisible(student)
+        self.magv_input.setVisible(not student)
+        self.magv_label.setVisible(not student)
+        self.staff_password_hint.setVisible(not student)
+        self.password_input.setEnabled(not student)
+        self.student_password_hint.setVisible(student)
+        if student:
+            self.password_input.clear()
             self.magv_input.clear()
+        else:
+            self.masv_input.clear()
 
     def _save(self) -> None:
         values = {
-            "username": self.username_input.text(),
             "role": self.role_combo.currentText(),
             "masv": self.masv_input.text(),
             "magv": self.magv_input.text(),
         }
-        if self._is_create:
-            values["password"] = self.password_input.text()
+        values["password"] = None if values["role"] == "SinhVien" else (self.password_input.text() or None)
+        self.password_input.clear()
 
         try:
             self._on_save(values)
@@ -116,16 +140,15 @@ class AccountFormDialog(QDialog):
 
 class AccountManagementDialog(QDialog):
     HEADERS = (
-        "Tên đăng nhập",
+        "Mã",
         "Họ và tên",
         "Vai trò",
-        "Mã SV/GV",
         "Trạng thái",
     )
     ROLE_LABELS = {
         "Admin": "Admin",
-        "SinhVien": "Sinh viên",
         "GiangVien": "Giảng viên",
+        "SinhVien": "Sinh viên",
     }
 
     def __init__(
@@ -168,17 +191,13 @@ class AccountManagementDialog(QDialog):
         self.add_button = QPushButton("Thêm tài khoản")
         self.add_button.setObjectName("addAccountButton")
         self.add_button.clicked.connect(self._add_account)
-        self.edit_button = QPushButton("Sửa")
-        self.edit_button.setObjectName("editAccountButton")
-        self.edit_button.clicked.connect(self._edit_account)
-        self.toggle_button = QPushButton("Khóa/Mở khóa")
-        self.toggle_button.setObjectName("toggleAccountButton")
-        self.toggle_button.clicked.connect(self._toggle_account_status)
+        self.delete_button = QPushButton("Xóa tài khoản")
+        self.delete_button.setObjectName("deleteAccountButton")
+        self.delete_button.clicked.connect(self._delete_account)
         close_button = QPushButton("Đóng")
         close_button.clicked.connect(self.accept)
         buttons.addWidget(self.add_button)
-        buttons.addWidget(self.edit_button)
-        buttons.addWidget(self.toggle_button)
+        buttons.addWidget(self.delete_button)
         buttons.addStretch()
         buttons.addWidget(close_button)
 
@@ -196,10 +215,9 @@ class AccountManagementDialog(QDialog):
         self.account_table.setRowCount(len(self._accounts))
         for row, account in enumerate(self._accounts):
             values = (
-                account.username,
+                (account.masv if account.role == "SinhVien" else account.magv) or account.username,
                 account.full_name or "—",
                 self.ROLE_LABELS.get(account.role, account.role),
-                account.masv or account.magv or "—",
                 "Đang hoạt động" if account.active else "Đã khóa",
             )
             for column, value in enumerate(values):
@@ -216,32 +234,30 @@ class AccountManagementDialog(QDialog):
         return self._accounts[row]
 
     def _add_account(self) -> None:
-        def save(values: dict[str, str]) -> None:
+        def save(values: dict[str, str | None]) -> None:
             self._service.create_account(**values)
 
         dialog = AccountFormDialog("Thêm tài khoản", save, parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._load_accounts()
 
-    def _edit_account(self) -> None:
+    def _delete_account(self) -> None:
         account = self._selected_account()
         if account is None:
             return
 
-        def save(values: dict[str, str]) -> None:
-            self._service.update_account(**values)
-
-        dialog = AccountFormDialog("Sửa tài khoản", save, account, parent=self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._load_accounts()
-
-    def _toggle_account_status(self) -> None:
-        account = self._selected_account()
-        if account is None:
+        answer = QMessageBox.question(
+            self,
+            "Xác nhận xóa tài khoản",
+            f"Bạn có chắc chắn muốn xóa SQL Login/User của {account.username}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            self._service.update_account_status(account.username, not account.active)
+            self._service.delete_account(account.username)
         except (AccountServiceError, PermissionError) as error:
-            QMessageBox.warning(self, "Không thể cập nhật tài khoản", str(error))
+            QMessageBox.warning(self, "Không thể xóa tài khoản", str(error))
             return
         self._load_accounts()

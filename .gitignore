@@ -7,3 +7,6 @@ backups/
 tests/*
 !tests/test_epic_1_5_auth.py
 !tests/test_backup_restore.py
+!tests/test_epic_1_4_permissions.py
+!tests/test_epic_1_6_accounts.py
+!tests/test_lecturer_management.py

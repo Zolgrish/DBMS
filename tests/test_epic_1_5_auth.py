@@ -60,7 +60,7 @@ class Connection:
         self.closed += 1
 
 
-ADMIN = User("canonical", "Admin", None, None, True)
+ADMIN = User("canonical", "Admin", None, "canonical", True)
 
 
 class Epic15Tests(unittest.TestCase):
@@ -105,6 +105,19 @@ class Epic15Tests(unittest.TestCase):
         with self.assertRaises(session.SessionRequiredError):
             session.require_master_connection()
 
+    def test_lecturer_magv_comes_from_database_user_and_never_opens_master(self):
+        connection = Connection([("GV00000002", "GV00000002", "QLDSV_GIANGVIEN")])
+        with patch("app.services.auth_service.open_sql_connection", return_value=connection) as connect:
+            user = AuthService().login("GV00000002", "runtime-secret")
+        self.assertEqual((user.role, user.magv, user.masv), ("GiangVien", "GV00000002", None))
+        connect.assert_called_once_with("GV00000002", "runtime-secret", autocommit=True)
+        with self.assertRaises(session.SessionRequiredError):
+            session.require_master_connection()
+        self.assertNotIn("runtime-secret", repr(session.current_user))
+        session.clear_session()
+        session.clear_session()
+        self.assertEqual(connection.closed, 1)
+
     def test_sql_errors_are_classified_without_echoing_driver_diagnostics(self):
         for state, number, expected in (
             ("28000", "18456", InvalidCredentialsError),
@@ -135,7 +148,9 @@ class Epic15Tests(unittest.TestCase):
 
     def test_missing_extra_or_unsupported_identity_is_rejected(self):
         for rows in ([], [("u", "u", "GiangVien")], [("u", "u", None)],
-                     [("u", "u", "QLDSV_ADMIN")] * 2, [(None, "u", "QLDSV_ADMIN")]):
+                     [("u", "u", "QLDSV_ADMIN")] * 2, [(None, "u", "QLDSV_ADMIN")],
+                     [("u", "u", "QLDSV_ADMIN,QLDSV_GIANGVIEN")],
+                     [("u", "u", "QLDSV_ADMIN,QLDSV_GIANGVIEN,QLDSV_SINHVIEN")]):
             candidate = Connection(rows)
             with patch("app.services.auth_service.open_sql_connection", return_value=candidate):
                 with self.assertRaises(AuthenticationServiceError):
@@ -230,8 +245,8 @@ class Epic15Tests(unittest.TestCase):
         self.assertNotIn("TaiKhoan", connection.statement.calls[0][0])
         self.assertEqual((connection.closed, connection.statement.closed), (1, 1))
 
-    def test_user_full_name_query_and_join_remain_unchanged(self):
-        connection = Connection([("SV00000002", "SinhVien", "SV00000002", None, True, "Nguyen", "An", None, None)])
+    def test_user_full_name_joins_remain_available_with_sql_metadata(self):
+        connection = Connection([("SV00000002", "QLDSV_SINHVIEN", "SV00000002", None, False, "Nguyen", "An", None, None)])
         session.set_authenticated(ADMIN, connection)
         accounts = AccountRepository().find_all_accounts()
         self.assertEqual(accounts[0].full_name, "Nguyen An")
@@ -309,23 +324,17 @@ class Epic15Tests(unittest.TestCase):
 
     def test_account_service_translates_session_loss_at_each_repository_path(self):
         cases = (
-            ("create_account", ("new", "pw", "Admin"), None),
-            ("create_account", ("new", "pw", "Admin"), False),
-            ("create_account", ("new", "pw", "SinhVien", "SV00000002"), False),
-            ("create_student_account", ("SV00000002",), False),
-            ("update_account", ("other", "Admin"), None),
-            ("update_account", ("other", "Admin"), True),
-            ("update_account", ("other", "SinhVien", "SV00000002"), None),
-            ("update_account", ("other", "GiangVien", "", "GV00000001"), None),
-            ("update_account_status", ("other", False), None),
+            ("create_account", ("Admin", "pw", "", "GV00000002")),
+            ("create_account", ("SinhVien", None, "SV00000002")),
+            ("create_student_account", ("SV00000002",)),
+            ("create_account", ("GiangVien", "pw", "", "GV00000001")),
+            ("delete_account", ("other",)),
         )
-        for method, args, username_exists in cases:
-            with self.subTest(method=method, args=args, username_exists=username_exists):
+        for method, args in cases:
+            with self.subTest(method=method, args=args):
                 qldsv, master = Connection(error=pyodbc.Error("08S01", "lost")), Connection()
                 session.set_authenticated(ADMIN, qldsv, master)
                 repository = AccountRepository()
-                if username_exists is not None:
-                    repository.exists_username = Mock(return_value=username_exists)
                 with patch.object(database.pyodbc, "connect") as connect:
                     with self.assertRaisesRegex(AccountServiceError, "Vui lòng đăng nhập lại"):
                         getattr(AccountService(repository), method)(*args)
@@ -336,10 +345,9 @@ class Epic15Tests(unittest.TestCase):
     def test_account_service_does_not_translate_unrelated_value_errors(self):
         cases = (
             ("find_all_accounts", (), "find_all_accounts"),
-            ("create_account", ("new", "pw", "Admin"), "exists_username"),
-            ("update_account", ("other", "Admin"), "exists_username"),
-            ("update_account_status", ("other", False), "update_account_status"),
-            ("update_account", ("other", "SinhVien", "SV00000002"), "student_exists"),
+            ("create_account", ("Admin", "pw", "", "GV00000002"), "create_account"),
+            ("delete_account", ("other",), "delete_account"),
+            ("create_account", ("GiangVien", "pw", "", "GV00000001"), "create_account"),
         )
         for method, args, repository_method in cases:
             with self.subTest(method=method, repository_method=repository_method):
@@ -369,9 +377,9 @@ class Epic15Tests(unittest.TestCase):
         self.assertIsNone(session.current_user)
         self.assertEqual((qldsv.closed, master.closed), (1, 1))
 
-    def test_account_management_status_callback_handles_connection_loss(self):
+    def test_account_management_delete_callback_handles_connection_loss(self):
         from app.ui.account_management import AccountManagementDialog
-        qldsv = Connection([("other", "Admin", None, None, True, None, None, None, None)])
+        qldsv = Connection([("other", "QLDSV_ADMIN", None, None, False, None, None, None, None)])
         master = Connection()
         session.set_authenticated(ADMIN, qldsv, master)
         dialog = AccountManagementDialog(AccountService())
@@ -379,11 +387,14 @@ class Epic15Tests(unittest.TestCase):
         dialog.account_table.selectRow(0)
         qldsv.statement.error = pyodbc.Error("08S01", "lost")
         with patch.object(database.pyodbc, "connect") as connect:
-            with patch.object(QMessageBox, "warning") as warning:
-                dialog._toggle_account_status()
+            with (
+                patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes),
+                patch.object(QMessageBox, "warning") as warning,
+            ):
+                dialog._delete_account()
             connect.assert_not_called()
         warning.assert_called_once_with(
-            dialog, "Không thể cập nhật tài khoản", "Phiên SQL không còn hiệu lực. Vui lòng đăng nhập lại."
+            dialog, "Không thể xóa tài khoản", "Phiên SQL không còn hiệu lực. Vui lòng đăng nhập lại."
         )
         self.assertIsNone(session.current_user)
         self.assertEqual((qldsv.closed, master.closed), (1, 1))
@@ -413,10 +424,10 @@ class Epic15Tests(unittest.TestCase):
         self.assertEqual(seen, [""])
         window.close()
 
-    def test_router_accepts_only_two_roles_and_logout_is_idempotent(self):
+    def test_router_accepts_three_roles_and_logout_is_idempotent(self):
         from app.main import ApplicationRouter
         router = ApplicationRouter(Mock())
-        for role in ("Admin", "SinhVien"):
+        for role in ("Admin", "GiangVien", "SinhVien"):
             connection = Connection()
             user = User("u", role, "SV00000002" if role == "SinhVien" else None, None, True)
             session.set_authenticated(user, connection)
@@ -426,7 +437,7 @@ class Epic15Tests(unittest.TestCase):
             router.return_to_login()
             self.assertEqual(connection.closed, 1)
         with patch.object(QMessageBox, "information"):
-            router.open_dashboard(User("u", "GiangVien", None, None, True))
+            router.open_dashboard(User("u", "Unsupported", None, None, True))
         self.assertIsNone(router.dashboard)
         router.shutdown()
         router.deleteLater()
