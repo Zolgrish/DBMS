@@ -162,16 +162,18 @@ BEGIN TRY
                   WHERE (u.name=N'QLDSV_GIANGVIEN' OR IS_ROLEMEMBER(N'QLDSV_GIANGVIEN',u.name)=1)
                   AND p.state IN ('G','W') AND NOT (
                     (p.class=0 AND p.permission_name=N'CONNECT' AND p.state='G') OR
-                    (p.class=1 AND p.major_id=ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'),-1)
+                    (p.class=1 AND p.major_id IN (ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1))
                      AND p.permission_name=N'EXECUTE' AND p.state='G')))
         THROW 51005, 'SEC-05: Lecturer has unexpected ownership/grants. Resolve explicitly before rerunning.', 1;
-    -- Exactly the two safe Epic 1.4 object grants; never broad EXECUTE.
+    -- Only the safe Epic 1.4/1.7 object grants; never broad EXECUTE.
     IF EXISTS (SELECT 1 FROM sys.database_permissions p
                WHERE p.grantee_principal_id IN (DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN'))
                  AND p.state IN ('G', 'W') AND NOT
                  ((p.class = 0 AND p.permission_name = N'CONNECT') OR
                   (p.class = 1 AND p.major_id IN (ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemDiem'), -1),
-                                                ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'), -1))
+                                                ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'), -1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'), -1))
                    AND p.permission_name = N'EXECUTE' AND p.state = 'G')))
         THROW 51005, 'SEC-05: Unexpected Student grants exist. Remove unsafe grants explicitly before rerunning.', 1;
 
