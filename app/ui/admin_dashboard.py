@@ -57,10 +57,9 @@ class AdminDashboard(DashboardWindow):
             dialog = BackupRestoreDialog(backup_service=self._backup_service, parent=self)
             try:
                 dialog.exec()
-                restored = dialog.restore_performed is True
             finally:
                 dialog.deleteLater()
-            if restored:
-                self.logout_requested.emit()
+            # Repository invalidation routes both successful and failed restore
+            # attempts back to Login. Do not emit a second logout transition.
             return
         super()._handle_action(action)

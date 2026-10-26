@@ -12,6 +12,7 @@ services:
       - "${MSSQL_PORT:-14330}:1433"
     volumes:
       - qldsv_sql_data:/var/opt/mssql
+      # App uses QLDSV_BACKUP_DIR on Windows; SQL uses QLDSV_SQL_BACKUP_DIR below.
       - ./backups:/var/opt/mssql/backups
     healthcheck:
       test:

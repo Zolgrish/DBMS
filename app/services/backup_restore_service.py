@@ -1,44 +1,48 @@
-"""Admin-only backup workflow, directory validation, and friendly errors."""
+"""Admin backup sets mapped by filename between host and SQL filesystems."""
 
 from dataclasses import dataclass
 from datetime import datetime
-import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+import re
+import uuid
 
 import pyodbc
 
-from app.repositories.backup_restore_repository import (
-    BackupRestoreRepository,
-    InvalidBackupError,
-    RestoreCleanupError,
-)
+from app.repositories.backup_restore_repository import BackupRestoreRepository, InvalidBackupError, RestoreCleanupError
 from app.services.authorization import require_admin
+from app.utils import session
 
 
 class BackupRestoreError(Exception):
-    """An expected backup/restore failure safe to display in the UI."""
+    """Safe, actionable backup/restore error for the UI."""
+
+
+class BackupSessionError(BackupRestoreError):
+    """Listing must stop on session loss, rather than skip every remaining file."""
 
 
 @dataclass(frozen=True)
 class BackupFile:
     filename: str
-    modified_at: datetime
+    position: int
+    user_name: str
     path: Path
+    started_at: datetime
+    finished_at: datetime
+
+    @property
+    def backup_at(self) -> datetime:
+        return self.finished_at
 
 
 class BackupRestoreService:
-    def __init__(
-        self,
-        repository: BackupRestoreRepository | None = None,
-        backup_directory: str | Path | None = None,
-    ) -> None:
+    def __init__(self, repository: BackupRestoreRepository | None = None,
+                 backup_directory: str | Path | None = None, sql_backup_directory: str | None = None) -> None:
         self._repository = repository or BackupRestoreRepository()
-        self._configured_path = (
-            str(backup_directory)
-            if backup_directory is not None
-            else os.getenv("QLDSV_BACKUP_DIR", "").strip()
-        )
+        self._configured_path = str(backup_directory) if backup_directory is not None else os.getenv("QLDSV_BACKUP_DIR", "")
+        self._sql_directory = sql_backup_directory if sql_backup_directory is not None else os.getenv("QLDSV_SQL_BACKUP_DIR", "")
+        self.skipped_files = 0
 
     def configured_directory(self) -> str:
         require_admin()
@@ -46,143 +50,174 @@ class BackupRestoreService:
 
     @staticmethod
     def generate_filename(at: datetime | None = None) -> str:
-        timestamp = (at or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")
-        return f"QLDSV_{timestamp}.bak"
+        stamp = (at or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")
+        return f"QLDSV_{stamp}_{uuid.uuid4().hex}.bak"
 
     def list_backups(self) -> list[BackupFile]:
         require_admin()
+        self.skipped_files = 0
         directory = self._directory()
+        self._validate_sql_directory()
         try:
-            backups = []
-            for path in directory.iterdir():
-                if path.is_symlink() or path.suffix.casefold() != ".bak" or not path.is_file():
-                    continue
-                backups.append(
-                    BackupFile(
-                        filename=path.name,
-                        modified_at=datetime.fromtimestamp(path.stat().st_mtime).astimezone(),
-                        path=path,
-                    )
-                )
-        except PermissionError:
-            raise BackupRestoreError("Ứng dụng không có quyền đọc thư mục sao lưu.") from None
+            paths = list(directory.iterdir())
         except OSError:
-            logging.exception("Không thể đọc thư mục sao lưu.")
-            raise BackupRestoreError("Không thể đọc danh sách file sao lưu.") from None
-        return sorted(backups, key=lambda backup: backup.modified_at, reverse=True)
+            raise BackupRestoreError("Không thể đọc thư mục backup trên máy ứng dụng. Kiểm tra quyền đọc.") from None
+        backups = []
+        for path in paths:
+            if path.suffix.casefold() != ".bak":
+                continue
+            try:
+                host = self._selected_file(directory, path.name)
+                sets = self._run_sql(lambda: self._repository.read_backup_sets(self._sql_path(path.name)), "metadata")
+                items = self._items(host, sets)
+                backups.extend(items)
+                if not items:
+                    self.skipped_files += 1
+            except BackupSessionError:
+                raise
+            except BackupRestoreError:
+                # A corrupt/unreadable/unrelated file does not hide usable backups.
+                self.skipped_files += 1
+        return sorted(backups, key=lambda item: (item.backup_at, item.filename, item.position), reverse=True)
 
     def backup_database(self) -> BackupFile:
         require_admin()
         directory = self._directory()
-        path = directory / self.generate_filename()
+        filename = self.generate_filename()
+        sql_path = self._sql_path(filename)
+        path = directory / filename
         try:
-            self._repository.create_backup(path)
-        except (pyodbc.Error, ValueError) as error:
-            logging.exception("Không thể sao lưu QLDSV.")
-            if self._is_connection_error(error):
-                raise BackupRestoreError("Không thể kết nối SQL Server để sao lưu.") from None
-            raise BackupRestoreError(
-                "SQL Server không thể tạo file sao lưu. Kiểm tra đường dẫn, quyền tài khoản "
-                "dịch vụ SQL Server và dung lượng đĩa."
-            ) from None
-        return self._file_info(path)
+            if path.exists() or path.is_symlink():
+                raise BackupRestoreError("Tên file backup đã tồn tại. Hãy thử lại; không ghi đè file có sẵn.")
+        except OSError:
+            raise BackupRestoreError("Không thể kiểm tra file backup trên máy ứng dụng. Kiểm tra quyền đọc thư mục.") from None
+        self._run_sql(lambda: self._repository.create_backup(sql_path), "backup")
+        try:
+            host = self._selected_file(directory, filename)
+        except BackupRestoreError:
+            raise BackupRestoreError("SQL Server đã chạy backup nhưng ứng dụng không đọc được file. Kiểm tra hai đường dẫn cùng Docker bind mount.") from None
+        items = self._items(host, self._run_sql(lambda: self._repository.read_backup_sets(sql_path), "metadata"))
+        if len(items) != 1 or items[0].position != 1:
+            raise BackupRestoreError("Không xác nhận được metadata full backup QLDSV vừa tạo.")
+        return items[0]
 
-    def restore_database(self, filename: str) -> None:
+    def verify_backup(self, filename: str, position: int) -> None:
         require_admin()
-        directory = self._directory()
-        path = self._selected_file(directory, filename)
-        try:
-            self._repository.verify_backup(path)
-        except InvalidBackupError as error:
-            raise BackupRestoreError(str(error)) from None
-        except (pyodbc.Error, ValueError) as error:
-            logging.exception("Không thể xác minh bản sao lưu.")
-            if self._is_connection_error(error):
-                raise BackupRestoreError("Không thể kết nối SQL Server để kiểm tra bản sao lưu.") from None
-            raise BackupRestoreError(
-                "Không thể xác minh bản sao lưu. File có thể hỏng hoặc SQL Server "
-                "không có quyền đọc đường dẫn này."
-            ) from None
+        _, sql_path = self._selection(filename, position)
+        self._run_sql(lambda: self._repository.verify_backup(sql_path, position), "verify")
 
+    def restore_database(self, filename: str, position: int) -> None:
+        require_admin()
+        self.verify_backup(filename, position)
+        # Check host visibility again after verification, before closing QLDSV.
+        _, sql_path = self._selection(filename, position)
+        self._run_sql(lambda: self._repository.restore_backup(sql_path, position), "restore")
+
+    def _selection(self, filename: str, position: int) -> tuple[Path, str]:
         try:
-            self._repository.restore_backup(path)
-        except RestoreCleanupError:
-            logging.exception("Không thể khôi phục chế độ MULTI_USER sau restore.")
-            raise BackupRestoreError(
-                "Phục hồi thất bại và không thể đưa QLDSV về chế độ MULTI_USER. "
-                "Hãy kiểm tra SQL Server trước khi tiếp tục sử dụng."
-            ) from None
-        except (pyodbc.Error, ValueError):
-            logging.exception("Phục hồi QLDSV thất bại.")
-            raise BackupRestoreError(
-                "Phục hồi thất bại. Kiểm tra quyền SQL Server, file sao lưu và các kết nối đang mở."
-            ) from None
+            BackupRestoreRepository.validate_position(position)
+        except InvalidBackupError:
+            raise BackupRestoreError("Position phải là số nguyên dương hợp lệ.") from None
+        host = self._selected_file(self._directory(), filename)
+        return host, self._sql_path(filename)
+
+    @staticmethod
+    def _items(path: Path, sets) -> list[BackupFile]:
+        return [BackupFile(path.name, item.position, item.user_name, path, item.started_at, item.finished_at)
+                for item in sets if item.database_name == "QLDSV" and item.backup_type == 1]
 
     def _directory(self) -> Path:
         if not self._configured_path:
-            raise BackupRestoreError("Chưa cấu hình QLDSV_BACKUP_DIR trong file .env.")
+            raise BackupRestoreError("Chưa cấu hình QLDSV_BACKUP_DIR cho máy ứng dụng.")
         directory = Path(self._configured_path).expanduser()
         if not directory.is_absolute():
-            raise BackupRestoreError("QLDSV_BACKUP_DIR phải là đường dẫn tuyệt đối.")
+            raise BackupRestoreError("QLDSV_BACKUP_DIR phải là đường dẫn tuyệt đối trên máy ứng dụng.")
         try:
-            if not directory.exists():
-                raise BackupRestoreError("Thư mục sao lưu không tồn tại.")
+            directory = directory.resolve(strict=True)
             if not directory.is_dir():
-                raise BackupRestoreError("Đường dẫn sao lưu không phải thư mục.")
-            return directory.resolve()
-        except PermissionError:
-            raise BackupRestoreError("Ứng dụng không có quyền truy cập thư mục sao lưu.") from None
-        except OSError:
-            logging.exception("Không thể truy cập thư mục sao lưu.")
-            raise BackupRestoreError("Không thể truy cập thư mục sao lưu.") from None
+                raise BackupRestoreError("QLDSV_BACKUP_DIR không phải thư mục.")
+            with os.scandir(directory):
+                pass
+            return directory
+        except FileNotFoundError:
+            raise BackupRestoreError("Thư mục backup trên máy ứng dụng không tồn tại.") from None
+        except (OSError, ValueError, RuntimeError):
+            raise BackupRestoreError("Không thể đọc thư mục backup trên máy ứng dụng. Kiểm tra đường dẫn và quyền đọc.") from None
+
+    def _validate_sql_directory(self) -> None:
+        value = self._sql_directory
+        if not value:
+            raise BackupRestoreError("Chưa cấu hình QLDSV_SQL_BACKUP_DIR cho SQL Server.")
+        if (not isinstance(value, str) or not value.startswith("/") or value.startswith("//")
+                or "\\" in value or ":" in value or value != value.strip()
+                or any(ord(c) < 32 for c in value) or ".." in PurePosixPath(value).parts
+                or str(PurePosixPath(value)) != value or value == "/"):
+            raise BackupRestoreError("QLDSV_SQL_BACKUP_DIR phải là đường dẫn Linux tuyệt đối, không có traversal.")
+
+    @staticmethod
+    def _validate_filename(filename: str) -> None:
+        if (not isinstance(filename, str) or not filename or filename != filename.strip()
+                or re.search(r'[\\/:*?"<>|\x00-\x1f]', filename) or filename.endswith(".")
+                or Path(filename).name != filename or Path(filename).suffix.casefold() != ".bak"
+                or filename.split(".", 1)[0].upper() in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}):
+            raise BackupRestoreError("Chỉ được chọn tên file .bak hợp lệ trong thư mục backup.")
+        try:
+            valid = len(filename.encode("utf-16-le")) <= 510
+        except UnicodeError:
+            valid = False
+        if not valid:
+            raise BackupRestoreError("Tên file backup không hợp lệ.")
+
+    def _sql_path(self, filename: str) -> str:
+        self._validate_filename(filename)
+        self._validate_sql_directory()
+        sql_path = str(PurePosixPath(self._sql_directory) / filename)
+        try:
+            BackupRestoreRepository._validate_sql_path(sql_path)
+        except InvalidBackupError:
+            raise BackupRestoreError("Đường dẫn file của SQL Server không hợp lệ hoặc quá dài.") from None
+        return sql_path
 
     def _selected_file(self, directory: Path, filename: str) -> Path:
-        if (
-            not isinstance(filename, str)
-            or not filename
-            or "/" in filename
-            or "\\" in filename
-            or Path(filename).name != filename
-            or Path(filename).suffix.casefold() != ".bak"
-        ):
-            raise BackupRestoreError("Chỉ được chọn file .bak trong thư mục sao lưu.")
+        self._validate_filename(filename)
         path = directory / filename
         try:
             if path.is_symlink():
-                raise BackupRestoreError("Không thể phục hồi từ liên kết tới file bên ngoài.")
+                raise BackupRestoreError("Không sử dụng backup qua symlink.")
             resolved = path.resolve(strict=True)
-            if not resolved.is_relative_to(directory) or not resolved.is_file():
-                raise BackupRestoreError("File sao lưu không hợp lệ.")
+            if resolved.parent != directory or not resolved.is_file():
+                raise BackupRestoreError("File backup không hợp lệ hoặc nằm ngoài thư mục cấu hình.")
+            with resolved.open("rb"):
+                pass
             return resolved
         except FileNotFoundError:
-            raise BackupRestoreError("Không tìm thấy file sao lưu đã chọn.") from None
-        except PermissionError:
-            raise BackupRestoreError("Ứng dụng không có quyền đọc file sao lưu.") from None
-        except OSError:
-            logging.exception("Không thể mở file sao lưu đã chọn.")
-            raise BackupRestoreError("Không thể đọc file sao lưu đã chọn.") from None
-
-    def _file_info(self, path: Path) -> BackupFile:
-        try:
-            return BackupFile(
-                filename=path.name,
-                modified_at=datetime.fromtimestamp(path.stat().st_mtime).astimezone(),
-                path=path,
-            )
-        except FileNotFoundError:
-            raise BackupRestoreError(
-                "SQL Server đã chạy lệnh sao lưu nhưng ứng dụng không thấy file. "
-                "Hãy dùng thư mục chung mà cả ứng dụng và SQL Server đều truy cập được."
-            ) from None
-        except PermissionError:
-            raise BackupRestoreError("Ứng dụng không có quyền đọc file sao lưu vừa tạo.") from None
-        except OSError:
-            logging.exception("Không thể xác nhận file sao lưu vừa tạo.")
-            raise BackupRestoreError("Không thể xác nhận file sao lưu vừa tạo.") from None
+            raise BackupRestoreError("Không tìm thấy file backup đã chọn trên máy ứng dụng.") from None
+        except (OSError, ValueError, RuntimeError):
+            raise BackupRestoreError("Không thể đọc file backup trên máy ứng dụng. Kiểm tra quyền đọc.") from None
 
     @staticmethod
-    def _is_connection_error(error: Exception) -> bool:
-        if isinstance(error, ValueError):
-            return True
-        state = str(error.args[0]) if error.args else ""
-        return state.startswith("08") or state in {"IM002", "HYT00", "HYT01"}
+    def _run_sql(action, operation: str):
+        failure = None
+        session_lost = False
+        try:
+            return action()
+        except session.SessionRequiredError:
+            session_lost = True
+        except InvalidBackupError as error:
+            failure = str(error)
+        except RestoreCleanupError:
+            failure = "Không thể đưa QLDSV về chế độ MULTI_USER. Hãy liên hệ Admin kiểm tra SQL Server trước khi đăng nhập lại."
+        except pyodbc.Error as error:
+            session_lost = session.is_connection_error(error)
+        except (OSError, ValueError):
+            pass
+        messages = {
+            "backup": "SQL Server không thể tạo backup. Kiểm tra quyền ghi thư mục container, quyền BACKUP và dung lượng đĩa.",
+            "metadata": "Không đọc được metadata backup. Kiểm tra file và quyền đọc của SQL Server trên thư mục container.",
+            "verify": "Không thể xác minh backup. File có thể hỏng hoặc SQL Server không có quyền đọc.",
+            "restore": "Phục hồi thất bại. Kiểm tra backup, quyền RESTORE và các kết nối đang sử dụng QLDSV. Hãy đăng nhập lại.",
+        }
+        # Raise outside handlers: driver diagnostics are neither logged nor chained.
+        if session_lost:
+            raise BackupSessionError("Phiên SQL không còn hiệu lực. Vui lòng đăng nhập lại.") from None
+        raise BackupRestoreError(failure or messages[operation]) from None

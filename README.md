@@ -12,6 +12,7 @@
 - Epic 1.5 đã triển khai Login bằng SQL credential người dùng nhập; identity/role lấy từ `sp_ThongTinDangNhap`, không đọc `dbo.TaiKhoan` để xác thực.
 - Epic 1.6 đã migrate danh sách/tạo/xóa account sang SQL Login/User/Role metadata và security SP.
 - Epic 1.7 triển khai self-change SQL Login password; source/tests đã có, deployment và kiểm chứng real-principal là bước riêng.
+- Epic 1.8 triển khai Backup/Restore qua Admin master, tách host/container path và chọn backup-set Position; live verification là bước riêng.
 
 Xem `AGENTS.md` và `specs/README.md` trước khi triển khai ticket mới.
 
@@ -189,7 +190,7 @@ Login form mở connection `QLDSV` bằng chính username/password vừa nhập,
 
 Session sở hữu connection `QLDSV` đang đăng nhập; Admin có thêm connection `master` mở bằng cùng credential và được kiểm tra cùng SQL Login. GiangVien/Student không có connection master. Connection dài hạn dùng `autocommit=True`; ODBC pooling bị tắt trước khi connect. Repository mượn connection và chỉ đóng cursor. Password không nằm trong User/session, không được giữ lại để reconnect hoặc ghi log. Logout, đóng cửa sổ và shutdown giải phóng các SQL session; mất kết nối yêu cầu đăng nhập lại.
 
-Backup/Restore repository mượn master của Admin. Trước khi restore, connection QLDSV được đóng; sau lần restore đã bắt đầu (thành công hoặc lỗi), session bị xóa và phải đăng nhập lại. Nếu master không thể thực hiện cleanup MULTI_USER, ứng dụng báo lỗi để xử lý SQL Server thủ công; không mở lại connection bằng password lưu sẵn. Mapping đường dẫn Windows/container và migration Backup/Restore đầy đủ vẫn thuộc milestone sau.
+Backup/Restore repository mượn master của Admin. Trước khi restore, connection QLDSV được đóng; sau lần restore đã bắt đầu (thành công hoặc lỗi), session bị xóa và phải đăng nhập lại. Nếu master không thể thực hiện cleanup MULTI_USER, ứng dụng báo lỗi để xử lý SQL Server thủ công; không mở lại connection bằng password lưu sẵn. Epic 1.8 bên dưới triển khai mapping Windows/container và backup metadata/Position.
 
 Epic 1.5 đổi cách repository mượn connection. Epic 1.6 migrate Account Management; Epic 1.7 migrate Change Password như mô tả bên dưới.
 
@@ -306,7 +307,7 @@ docker compose up -d --build
 
 `down -v` xóa named volume database. Không chạy lệnh này nếu container đang chứa dữ liệu cần giữ.
 
-## Backup volume
+## Epic 1.8 — Backup & Restore
 
 Repository bind-mount:
 
@@ -315,7 +316,45 @@ Host:      .\backups
 SQL Server container: /var/opt/mssql/backups
 ```
 
-Phần Backup/Restore của app hiện cần được điều chỉnh ở milestone tương ứng vì Python chạy trên Windows còn SQL Server chạy trong Linux container; hai phía nhìn cùng file qua hai path khác nhau.
+Hai đường dẫn cùng trỏ tới Docker bind mount trên nhưng thuộc hai filesystem namespace khác nhau. Cấu hình đích trong môi trường ứng dụng hoặc `.env` local (không chứa credential trong các giá trị này):
+
+```dotenv
+DB_SERVER=localhost,14330
+QLDSV_BACKUP_DIR=D:\DBMS\backups
+QLDSV_SQL_BACKUP_DIR=/var/opt/mssql/backups
+```
+
+`QLDSV_BACKUP_DIR` phải là thư mục tuyệt đối, tồn tại và đọc được trên Windows host; `QLDSV_SQL_BACKUP_DIR` phải là đường dẫn Linux tuyệt đối cho SQL Server. Folder container phải có quyền ghi/đọc cho SQL Server service. App chỉ map **filename đã validate** giữa hai namespace: Windows path dùng kiểm tra file/hiển thị; SQL path dùng BACKUP/HEADERONLY/VERIFYONLY/RESTORE. Không gửi Windows path sang SQL Server, không stat Linux path từ Python. Thay đổi cấu hình local là bước riêng; task source không sửa `.env` thật.
+
+Chỉ Admin có menu và service Backup/Restore; repository mượn master đã xác thực cùng SQL Login với QLDSV. Student/GiangVien không có master connection hoặc quyền quản trị backup/restore. Không dùng sa, shared credential hoặc nâng quyền; Admin giữ CONTROL trên QLDSV và dbcreator hiện có.
+
+Backup tạo filename có timestamp và UUID, không ghi đè tên đã có, rồi chạy full `BACKUP DATABASE [QLDSV] ... WITH INIT, CHECKSUM`. Lệnh SQL chờ hết ODBC result sets; thành công chỉ được báo sau khi file hiện trên host và SQL header trả metadata full QLDSV hợp lệ. Backup do ứng dụng tạo có checksum; VERIFYONLY vẫn chọn đúng Position nhưng không bắt buộc CHECKSUM, nên full backup QLDSV hợp lệ từ bên ngoài không bị từ chối chỉ vì được tạo không có backup checksum.
+
+Lịch sử đọc **mọi row của RESTORE HEADERONLY** cho từng `.bak` trong folder host, chỉ giữ full database backup của QLDSV. Mỗi backup set là một dòng: Tên file, Thời gian backup, Position, User, Đường dẫn host. Thời gian lấy từ BackupFinishDate/BackupStartDate do SQL Server trả về, không dùng filesystem mtime; sắp xếp mới nhất trước. File symlink/hỏng/không đọc được hoặc không có full QLDSV set được bỏ qua và UI báo số file đã bỏ qua. Mất session làm dừng tải lịch sử và yêu cầu đăng nhập lại.
+
+Restore chọn chính xác filename + Position (số nguyên dương), xác nhận rõ mọi thay đổi sau backup sẽ bị mất. Repository kiểm tra selected header có DatabaseName=QLDSV, BackupType=1, chạy VERIFYONLY với đúng FILE/Position rồi RESTORE với cùng FILE, REPLACE, RECOVERY. File paths luôn là parameters, chỉ Position integer đã kiểm tra được format vào SQL. Trước SINGLE_USER WITH ROLLBACK IMMEDIATE, connection QLDSV vật lý được đóng; master giữ nguyên để luôn thử MULTI_USER sau cả thành công/lỗi. Sau khi restore attempt bắt đầu, session bị invalidated một lần và router về Login; không reconnect bằng password lưu sẵn. Lỗi trước restore (file/metadata/verify) không báo thành công hoặc đăng xuất trừ khi mất kết nối. Cleanup MULTI_USER thất bại có thông báo yêu cầu Admin xử lý SQL Server.
+
+Kiểm tra offline (SQL đều được fake; không restore database thật):
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:QT_QPA_PLATFORM='offscreen'
+.\.venv\Scripts\python.exe -m unittest tests.test_backup_restore -v
+.\.venv\Scripts\python.exe -m unittest tests.test_epic_1_5_auth -v
+.\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_*.py'
+```
+
+Verifier real-principal riêng, chỉ chạy trên đích được phép kiểm tra:
+
+```powershell
+.\.venv\Scripts\python.exe docker/verify-backup-restore.py
+```
+
+Mặc định verifier chỉ login bằng application Admin hiện tại (`QLDSV_ADMIN_LOGIN`, mặc định GV00000001; password từ process `QLDSV_ADMIN_PASSWORD` hoặc hidden prompt), dùng DB_* như app, kiểm tra same-login master và hai thư mục, tạo production backup, kiểm tra host/history/time/User/Position rồi VERIFYONLY. Nó audit metadata quyền Student/GiangVien; có thể cung cấp process `QLDSV_VERIFY_STUDENT_LOGIN` + `QLDSV_VERIFY_STUDENT_PASSWORD` và tương tự `QLDSV_VERIFY_LECTURER_LOGIN` + `QLDSV_VERIFY_LECTURER_PASSWORD` để kiểm tra quyền hiệu lực bằng chính các Login đó (chỉ query, không cấp master hoặc thử restore). Thiếu credential tùy chọn sẽ báo SKIP phần real-principal tương ứng; không đoán/reset mật khẩu. Cleanup chỉ xóa file backup mới do verifier tạo khi filesystem identity/size/mtime vẫn khớp; file thay đổi/ownership không chắc chắn được giữ lại và báo rõ.
+
+**Destructive restore là opt-in riêng:** chỉ đúng process `QLDSV_ALLOW_LIVE_RESTORE=YES` mới bật acceptance Backup → tạo probe table riêng sau backup → Restore đúng Position qua production service → đăng nhập lại bằng current Admin credential → chứng minh probe biến mất, QLDSV MULTI_USER và 5 bảng cốt lõi còn tồn tại. Đây là explicit reauthentication trong verifier, không phải app auto-reconnect. **Restore QLDSV loại bỏ mọi thay đổi sau backup, kể cả của người khác; chỉ chạy sau khi được cho phép trên dữ liệu test được thay thế.** Không đặt opt-in này mặc định. Probe có tên ngẫu nhiên/object_id/token sở hữu; cleanup từ chối xóa khi identity không khớp. Nếu acceptance thất bại, giữ recovery backup và báo trạng thái probe chưa rõ để kiểm tra thủ công. Verifier không deploy SQL, chạy Docker, KILL session, reset password, đổi compatibility level hoặc sửa business rows.
+
+**Chưa chạy non-destructive live backup verifier hoặc destructive QLDSV restore acceptance trong task source này.** Source/tests không chứng minh quyền/path thực tế của SQL Server container; live acceptance vẫn chờ môi trường và sự cho phép riêng.
 
 ## Cài Python application
 

@@ -190,12 +190,13 @@ class Epic15Tests(unittest.TestCase):
 
     def test_env_loader_imports_target_settings_without_bootstrap_credentials(self):
         settings = {"DB_SERVER": "docker,14330", "DB_DATABASE": "QLDSV", "DB_DRIVER": "driver",
-                    "QLDSV_BACKUP_DIR": "backup-target", "DB_USERNAME": "fixed", "DB_PASSWORD": "secret",
+                    "QLDSV_BACKUP_DIR": "backup-target", "QLDSV_SQL_BACKUP_DIR": "/var/opt/mssql/backups",
+                    "DB_USERNAME": "fixed", "DB_PASSWORD": "secret",
                     "QLDSV_ADMIN_PASSWORD": "bootstrap", "MSSQL_SA_PASSWORD": "bootstrap"}
         with patch.dict(os.environ, {}, clear=True):
             with patch.object(database, "dotenv_values", return_value=settings):
                 database._load_target_settings()
-            self.assertEqual(set(os.environ), {"DB_SERVER", "DB_DATABASE", "DB_DRIVER", "QLDSV_BACKUP_DIR"})
+            self.assertEqual(set(os.environ), {"DB_SERVER", "DB_DATABASE", "DB_DRIVER", "QLDSV_BACKUP_DIR", "QLDSV_SQL_BACKUP_DIR"})
 
     def test_clear_and_replacement_close_each_owned_connection_once(self):
         old, master, new = Connection(), Connection(), Connection()
@@ -265,14 +266,14 @@ class Epic15Tests(unittest.TestCase):
             with self.assertRaises(session.SessionRequiredError):
                 AccountRepository().student_exists("SV00000002")
             with self.assertRaises(session.SessionRequiredError):
-                BackupRestoreRepository().create_backup(Path("unused.bak"))
+                BackupRestoreRepository().create_backup("/var/opt/mssql/backups/unused.bak")
             connect.assert_not_called()
 
     def test_backup_borrows_master_and_does_not_close_it(self):
         qldsv, master = Connection(), Connection()
         master.statement.description = None
         session.set_authenticated(ADMIN, qldsv, master)
-        BackupRestoreRepository().create_backup(Path("unused.bak"))
+        BackupRestoreRepository().create_backup("/var/opt/mssql/backups/unused.bak")
         self.assertIn("BACKUP DATABASE", master.statement.calls[0][0])
         self.assertEqual((master.closed, master.statement.closed, qldsv.closed), (0, 1, 0))
 
@@ -285,7 +286,7 @@ class Epic15Tests(unittest.TestCase):
             return execute(sql, *args)
         master.statement.execute = check_closed
         session.set_authenticated(ADMIN, qldsv, master)
-        BackupRestoreRepository().restore_backup(Path("unused.bak"))
+        BackupRestoreRepository().restore_backup("/var/opt/mssql/backups/unused.bak", 1)
         self.assertIsNone(session.current_user)
         self.assertEqual((qldsv.closed, master.closed), (1, 1))
 
@@ -294,7 +295,7 @@ class Epic15Tests(unittest.TestCase):
         session.set_authenticated(ADMIN, qldsv, master)
         with patch.object(database.pyodbc, "connect") as connect:
             with self.assertRaises(RestoreCleanupError):
-                BackupRestoreRepository().restore_backup(Path("unused.bak"))
+                BackupRestoreRepository().restore_backup("/var/opt/mssql/backups/unused.bak", 1)
             connect.assert_not_called()
         self.assertIsNone(session.current_user)
         self.assertEqual((qldsv.closed, master.closed), (1, 1))
