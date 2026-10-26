@@ -23,7 +23,7 @@ def _load_target_settings() -> None:
     # settings, so bootstrap passwords never become implicit app credentials.
     if dotenv_values is not None:
         settings = dotenv_values(PROJECT_ROOT / ".env")
-        for name in ("DB_DRIVER", "DB_SERVER", "DB_DATABASE", "QLDSV_BACKUP_DIR"):
+        for name in ("DB_DRIVER", "DB_SERVER", "DB_DATABASE", "QLDSV_BACKUP_DIR", "QLDSV_SQL_BACKUP_DIR"):
             if settings.get(name) is not None:
                 os.environ.setdefault(name, settings[name])
 
