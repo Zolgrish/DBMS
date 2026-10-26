@@ -1,4 +1,4 @@
-"""SQL principal account management; password migration remains Epic 1.7."""
+"""SQL principal account management and self password changes."""
 
 from app.utils import session
 from app.models.user import User
@@ -117,20 +117,16 @@ class AccountRepository:
 
     def update_password(
         self,
-        username: str,
         current_password: str,
         new_password: str,
-    ) -> bool:
-        """Isolated legacy Change Password path, pending Epic 1.7 migration."""
-        with session.qldsv_cursor() as cursor:
-            cursor = cursor.execute(
-                """
-                UPDATE dbo.TaiKhoan
-                SET MATKHAU = ?
-                WHERE TENDANGNHAP = ? AND MATKHAU = ?
-                """,
-                new_password,
-                username,
-                current_password,
-            )
-            return cursor.rowcount > 0
+    ) -> None:
+        """SQL derives the target Login from the borrowed authenticated session."""
+        try:
+            with session.qldsv_cursor() as cursor:
+                cursor.execute(
+                    "EXEC dbo.sp_DoiMatKhau @OldPassword=?, @NewPassword=?;",
+                    current_password,
+                    new_password,
+                )
+        finally:
+            current_password = new_password = ""

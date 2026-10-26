@@ -10,7 +10,8 @@
 - `dbo.TaiKhoan` đã bị loại khỏi kiến trúc mục tiêu. Docker **không** chạy `CreateTaiKhoan.sql` hoặc `seedTaiKhoan.sql`.
 - Epic 1.3 bootstrap Login/User/Role; Epic 1.4 cung cấp security SP và ủy quyền tạo account qua server role kỹ thuật.
 - Epic 1.5 đã triển khai Login bằng SQL credential người dùng nhập; identity/role lấy từ `sp_ThongTinDangNhap`, không đọc `dbo.TaiKhoan` để xác thực.
-- Epic 1.6 đã migrate danh sách/tạo/xóa account sang SQL Login/User/Role metadata và security SP; đổi mật khẩu còn chờ Epic 1.7.
+- Epic 1.6 đã migrate danh sách/tạo/xóa account sang SQL Login/User/Role metadata và security SP.
+- Epic 1.7 triển khai self-change SQL Login password; source/tests đã có, deployment và kiểm chứng real-principal là bước riêng.
 
 Xem `AGENTS.md` và `specs/README.md` trước khi triển khai ticket mới.
 
@@ -60,7 +61,7 @@ SQL scripts được chạy theo thứ tự:
 3. storedProcedure.sql
 4. seedData.sql
 5. Security.sql                    (bắt buộc, Epic 1.3)
-6. StoredProcedures_Security.sql   (Epic 1.4, chạy qua hook hiện có)
+6. StoredProcedures_Security.sql   (Epic 1.4/1.7, chạy qua hook hiện có)
 ```
 
 `CreateTaiKhoan.sql` và `seedTaiKhoan.sql` được giữ như legacy source hiện tại nhưng **không nằm trong bootstrap Docker**, nên `dbo.TaiKhoan` không bị tạo lại.
@@ -111,11 +112,11 @@ Login có sẵn **không bị tạo lại, reset password hoặc đổi password
 | Database | GRANT CONTROL ON DATABASE::QLDSV | DENY SELECT, INSERT, UPDATE, DELETE ON SCHEMA::dbo | DENY SELECT, INSERT, UPDATE, DELETE ON SCHEMA::dbo |
 | SP-01..SP-09 | Được thực thi qua CONTROL | DENY EXECUTE từng procedure | DENY EXECUTE từng procedure |
 | Server | Member `QLDSV_ACCOUNT_ADMIN` và `dbcreator` | Không server role/quyền quản trị | Không server role/quyền quản trị |
-| Safe SP | EXECUTE qua CONTROL (SP điểm yêu cầu Student) | Chỉ `sp_ThongTinDangNhap` | `sp_ThongTinDangNhap`, `sp_SinhVien_XemDiem` |
+| Safe SP | EXECUTE qua CONTROL (SP điểm yêu cầu Student) | `sp_ThongTinDangNhap`, `sp_DoiMatKhau` | `sp_ThongTinDangNhap`, `sp_SinhVien_XemDiem`, `sp_DoiMatKhau` |
 
 `QLDSV_ACCOUNT_ADMIN` là **server role kỹ thuật**, không phải business database role. Role có `ALTER ANY LOGIN` và `ALTER ON SERVER ROLE::QLDSV_ACCOUNT_ADMIN` trên chính nó để Admin hợp lệ ủy quyền membership cho Admin mới; `dbcreator` phục vụ Restore và thành viên của nó có thể thêm/bỏ thành viên cùng role. Bootstrap chuyển direct grant `ALTER ANY LOGIN` cũ sang quyền kế thừa từ technical role. Không cấp `sysadmin`, `securityadmin`, `CONTROL SERVER`, `ALTER ANY SERVER ROLE` toàn server hoặc nest custom role vào `db_owner`. Student không được GRANT/DENY EXECUTE toàn schema `dbo`; safe SP dùng static SQL cùng owner hoạt động qua ownership chaining.
 
-GiangVien được tạo từ Account Management với MAGV có sẵn, không có server admin roles; chỉ identity SP, không account/backup/direct CRUD.
+GiangVien được tạo từ Account Management với MAGV có sẵn, không có server admin roles; có identity SP và self-change password SP, không account/backup/direct CRUD.
 
 Kết nối SSMS bằng **SQL Server Authentication**, server `localhost,14330`, database `QLDSV`:
 
@@ -167,7 +168,7 @@ Input dùng `nvarchar(max)` để kiểm tra vượt 128 UTF-16 code units **tr�
 
 `@CreatedSid` được đặt NULL khi vào procedure, gán sau khi tạo đủ Login/User/roles và trước COMMIT, rồi đặt lại NULL nếu lỗi. Procedure không thêm result set; SQL caller cũ được phép bỏ output parameter. `@ExpectedSid` cũng tùy chọn: UI xóa thông thường không cần truyền, còn tooling/integration cleanup truyền SID đã nhận khi tạo. Delete kiểm tra SID trong transaction trước khi thay đổi memberships và kiểm tra lại ngay trước DROP LOGIN; mismatch `52016` rollback cả User/membership đã thay đổi.
 
-Admin có EXECUTE trên cả bốn SP (SP điểm vẫn yêu cầu Student). GiangVien chỉ có identity SP; account/own-score SP bị DENY. Student bị **DENY EXECUTE** trên `sp_TaoTaiKhoan`, `sp_XoaTaiKhoan`; chỉ được **GRANT EXECUTE** riêng trên `sp_ThongTinDangNhap`, `sp_SinhVien_XemDiem`. Data/schema và common-SP denials từ Epic 1.3 được giữ nguyên. `Security.sql` chỉ chấp nhận CONNECT và hai safe object grants này trong Student preflight.
+Admin có EXECUTE trên các SP bảo mật (SP điểm vẫn yêu cầu Student). GiangVien có identity SP; account/own-score SP bị DENY. Student bị **DENY EXECUTE** trên `sp_TaoTaiKhoan`, `sp_XoaTaiKhoan`; được **GRANT EXECUTE** riêng trên `sp_ThongTinDangNhap`, `sp_SinhVien_XemDiem`. Epic 1.7 thêm object-specific `sp_DoiMatKhau` cho cả ba role. Data/schema và common-SP denials từ Epic 1.3 được giữ nguyên; lưu ý bootstrap preflight bên dưới.
 
 Kiểm chứng real-principal sau khi bootstrap:
 
@@ -178,7 +179,7 @@ python docker/verify-security.py
 
 Verifier Epic 1.4 dùng password Admin hiện tại từ process hoặc hidden prompt; từ chối chạy nếu `SV00000002` đã có Login/User để không đụng account có sẵn. Nó tạo Admin tạm gắn disposable Giangvien.MAGV bằng SP, dùng chính Admin mới tạo Student `SV00000002/123456`, kiểm tra raw attempts của MASV seed, SQL identity và các lệnh bị chặn. Test gồm Lecturer identity/data/common-SP/account/own-score denials, staff default/password policy, self-delete, identity không role/dual/triple role, collisions, input/injection, late-failure rollback sau CREATE LOGIN, và giữ một connection Admin tạm để chứng minh DROP LOGIN thất bại rồi rollback cả User/roles. Sau khi tự đóng connection đó, delete thành công. Không KILL session hoặc Restore QLDSV. Principal/object tạm và disposable Giangvien/Sinhvien rows được dọn trong `finally`; seed rows/điểm giữ nguyên.
 
-Verifier rebuild image `db-init` từ working tree trước khi thay đổi principal, chạy procedure file hai lần và Docker db-init lại, chứng minh quyền được cấp lại và password đã đổi được giữ nguyên. Account UI được triển khai trong Epic 1.6; đổi mật khẩu UI và tích hợp CRUD Sinh viên thuộc các milestone sau. Per-user Python connection được triển khai trong Epic 1.5.
+Verifier rebuild image `db-init` từ working tree trước khi thay đổi principal, chạy procedure file hai lần và Docker db-init lại, chứng minh quyền được cấp lại và password đã đổi được giữ nguyên. Account UI được triển khai trong Epic 1.6; đổi mật khẩu UI trong Epic 1.7; tích hợp CRUD Sinh viên thuộc milestone riêng. Per-user Python connection được triển khai trong Epic 1.5.
 
 ## Epic 1.5 — Đăng nhập bằng SQL Server account
 
@@ -190,7 +191,7 @@ Session sở hữu connection `QLDSV` đang đăng nhập; Admin có thêm conne
 
 Backup/Restore repository mượn master của Admin. Trước khi restore, connection QLDSV được đóng; sau lần restore đã bắt đầu (thành công hoặc lỗi), session bị xóa và phải đăng nhập lại. Nếu master không thể thực hiện cleanup MULTI_USER, ứng dụng báo lỗi để xử lý SQL Server thủ công; không mở lại connection bằng password lưu sẵn. Mapping đường dẫn Windows/container và migration Backup/Restore đầy đủ vẫn thuộc milestone sau.
 
-Epic 1.5 chỉ đổi cách repository mượn connection. Epic 1.6 tiếp tục migrate Account Management như mô tả bên dưới; riêng Change Password còn legacy, chờ Epic 1.7.
+Epic 1.5 đổi cách repository mượn connection. Epic 1.6 migrate Account Management; Epic 1.7 migrate Change Password như mô tả bên dưới.
 
 Kiểm chứng app layer bằng SQL principals thật (ODBC + `.venv`):
 
@@ -220,7 +221,7 @@ Có ba application role: QLDSV_ADMIN → Admin, QLDSV_GIANGVIEN → GiangVien, Q
 
 List/create/delete không sử dụng `dbo.TaiKhoan`. Repository chỉ mượn connection SQL đã xác thực; không tạo principal bằng SQL động từ Python, không reconnect hoặc dùng credential cố định. Lỗi `520xx` được chuyển thành thông báo an toàn. Mất kết nối vẫn invalidates session và đưa người dùng về Login.
 
-Epic 1.6 không hỗ trợ Edit, đổi role/mapping hoặc Lock/Unlock. **Change Password vẫn chờ Epic 1.7**; legacy `update_password()` được giữ riêng, chưa hoạt động với SQL Login khi không có bảng legacy.
+Epic 1.6 không hỗ trợ Edit, đổi role/mapping hoặc Lock/Unlock. Change Password dùng SQL Login trong Epic 1.7.
 
 Kiểm chứng bằng real Admin principal trên database đã bootstrap, không có bảng legacy:
 
@@ -239,6 +240,34 @@ Tests Epic 1.6 riêng:
 ```powershell
 .\.venv\Scripts\python.exe -m unittest discover -s tests -p 'test_epic_1_6_accounts.py' -v
 ```
+
+## Epic 1.7 — Đổi mật khẩu SQL Login của chính mình
+
+Admin, GiangVien và SinhVien dùng form ba trường: mật khẩu hiện tại, mật khẩu mới, xác nhận. Service kiểm tra phiên SQL, các trường bắt buộc, xác nhận khớp và giới hạn 128 đơn vị UTF-16; giữ nguyên khoảng trắng và không áp complexity riêng trong Python. Repository chỉ mượn `session.qldsv_cursor()` để gọi `dbo.sp_DoiMatKhau @OldPassword=?, @NewPassword=?`, không gửi username hoặc mở connection khác. Luồng này không phụ thuộc `dbo.TaiKhoan`.
+
+Procedure suy ra current principal bằng `SUSER_SNAME()`, `ORIGINAL_LOGIN()`, `USER_NAME()`; kiểm tra Login/User cùng tên/SID, đúng một direct business role owned by dbo và MAGV/MASV còn tồn tại. `ALTER LOGIN` dùng identifier server-derived qua `QUOTENAME`, escape cả hai password và **luôn có OLD_PASSWORD**, kể cả Admin. Không có reset mật khẩu người khác hoặc quyền server mới. SQL Server giữ nguyên CHECK_POLICY/CHECK_EXPIRATION và tự enforce chính sách/history theo Login của Staff/Student.
+
+Lỗi `52101` invalidates session vì identity không hợp lệ: xóa current_user, đóng connection QLDSV/master và phát signal để router về Login; `52102` báo mật khẩu hiện tại bị từ chối (bao gồm SQL `15151` sau identity preflight); `52103` báo policy/history (SQL `15114..15119`); `52104` xử lý lockout (`15113`), lỗi validation bất thường (`15120`) và lỗi không xác định bằng thông báo chung an toàn. Các lỗi `52102`/`52103`/`52104` và validation không đăng xuất; mất kết nối vẫn do session cursor invalidate như trước. Không đưa diagnostics/password vào thông báo hoặc log. Form xóa cả ba trường sau mỗi lần submit. Password không lưu trong User/session/config; session hiện có tiếp tục hoạt động sau đổi và ứng dụng không tự logout/reconnect. Acceptance live cần chứng minh connection mới dùng password cũ thất bại và password mới thành công.
+
+Tests source, không cần database:
+
+```powershell
+$env:PYTHONDONTWRITEBYTECODE='1'
+$env:QT_QPA_PLATFORM='offscreen'
+.\.venv\Scripts\python.exe -m unittest tests.test_change_password -v
+```
+
+Verifier chỉ chạy sau khi được phép live verification và procedure/grants đã được deploy:
+
+```powershell
+.\.venv\Scripts\python.exe docker/verify-change-password.py
+```
+
+Verifier nhận đích `DB_*` và password Admin **hiện tại** từ process `QLDSV_ADMIN_PASSWORD` hoặc hidden prompt; noninteractive thiếu credential sẽ dừng trước mutation. Dùng ba identity có business row sẵn nhưng chưa có Login/User: `QLDSV_VERIFY_STUDENT` (mặc định `SV00000002`), `QLDSV_VERIFY_LECTURER` (`GV00000002`), `QLDSV_VERIFY_ADMIN` (`GV00000003`). Từ chối reuse principal có sẵn; tạo qua `sp_TaoTaiKhoan`, giữ `CreatedSid` và dọn trong `finally` với `ExpectedSid`. Cleanup lỗi hiển thị identity cần kiểm tra, không fallback xóa theo tên. Không sửa business rows hoặc password bootstrap/demo, không deploy/Docker/KILL/Restore/ALTER compatibility level, không dùng sa.
+
+Verifier kiểm tra cả ba role: initial login, sai mật khẩu cũ không đổi credential, đổi đúng qua production service/repository, phiên đang mở vẫn dùng được, logout rồi fresh old-password fail/new-password success, identity/role/SID/policy giữ nguyên. Admin cũng phải bị chặn khi OLD_PASSWORD sai dù có ALTER ANY LOGIN. **Verifier chưa được chạy trong task triển khai source này; chưa xác nhận live SQL.**
+
+Drift-preflight allowlists trong `database/Security.sql` đã bao gồm object-specific EXECUTE trên `sp_DoiMatKhau` cho GiangVien và Student. GiangVien chỉ chấp nhận CONNECT, identity SP và password-change SP; Student thêm own-score SP. Ownership/unexpected-grant checks được giữ nguyên; không thêm schema/database-wide EXECUTE. Thay đổi này mới được kiểm tra ở source/tests, chưa deploy hoặc chạy kiểm chứng SQL live.
 
 ## Quản lý giảng viên (Admin)
 
@@ -264,7 +293,7 @@ Verifier chỉ được chạy **sau khi được phép deploy và `database/Sto
 .\.venv\Scripts\python.exe docker/verify-lecturer-management.py
 ```
 
-Verifier chưa chạy trong task source này. Nó fail closed khi thiếu prerequisites, chỉ dùng application Admin và disposable MAGV/account/PhanCong, giữ CreatedSid/ExpectedSid khi dọn account; không reset mật khẩu, KILL session hoặc restore DB. Kiểm chứng live SQL và concurrency còn chờ deployment/credential phù hợp. Epic 1.7 và grading vẫn deferred.
+Verifier chưa chạy trong task source này. Nó fail closed khi thiếu prerequisites, chỉ dùng application Admin và disposable MAGV/account/PhanCong, giữ CreatedSid/ExpectedSid khi dọn account; không reset mật khẩu, KILL session hoặc restore DB. Kiểm chứng live SQL và concurrency còn chờ deployment/credential phù hợp. Grading vẫn thuộc milestone riêng.
 
 ## Reset database development
 
@@ -296,7 +325,7 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Chạy `.\.venv\Scripts\python.exe -m app.main`, nhập SQL Login và password hiện tại. Authentication và Account Management list/create/delete không phụ thuộc `dbo.TaiKhoan`; đổi mật khẩu còn chờ Epic 1.7.
+Chạy `.\.venv\Scripts\python.exe -m app.main`, nhập SQL Login và password hiện tại. Authentication, Account Management list/create/delete và Change Password không phụ thuộc `dbo.TaiKhoan`.
 
 ## Cấu trúc chính
 
@@ -323,6 +352,6 @@ Thứ tự triển khai SQL bắt buộc:
 
 Đây là hướng dẫn cho bước deployment riêng, không xác nhận Lecturer SQL đã được deploy. Không reset database, không đổi compatibility_level hoặc mật khẩu/policy của Login có sẵn. Không deploy riêng một phần migration.
 
-Nếu thiếu `QLDSV_ADMIN_PASSWORD` hiện tại, deployment và real-principal tests còn blocked; không đoán, reset hoặc dùng sa thay Admin. Verifier noninteractive fail closed trước mọi mutation nếu thiếu credential này. Thứ tự kiểm chứng: `verify-security.py` → `verify-security-procedures.py` → `verify-authentication.py` → `verify-account-management.py` → `verify-lecturer-management.py`. Chỉ chạy `docker/verify-lecturer-management.py` sau khi `database/StoredProcedures_Lecturer.sql` đã được deploy.
+Nếu thiếu `QLDSV_ADMIN_PASSWORD` hiện tại, deployment và real-principal tests còn blocked; không đoán, reset hoặc dùng sa thay Admin. Verifier noninteractive fail closed trước mọi mutation nếu thiếu credential này. Thứ tự kiểm chứng: `verify-security.py` → `verify-security-procedures.py` → `verify-authentication.py` → `verify-account-management.py` → `verify-change-password.py` → `verify-lecturer-management.py`. Chỉ chạy `docker/verify-lecturer-management.py` sau khi `database/StoredProcedures_Lecturer.sql` đã được deploy.
 
-Generic Admin thiếu MAGV, dual/triple membership và role name/type/owner/SID drift đều cần xử lý thủ công; bootstrap không tự sửa. Change Password vẫn deferred Epic 1.7; grading cuối cùng phải enforce PhanCong ở SQL SP như specs/06-grading.md.
+Generic Admin thiếu MAGV, dual/triple membership và role name/type/owner/SID drift đều cần xử lý thủ công; bootstrap không tự sửa. Change Password source thuộc Epic 1.7; grading cuối cùng phải enforce PhanCong ở SQL SP như specs/06-grading.md.

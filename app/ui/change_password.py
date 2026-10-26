@@ -60,24 +60,28 @@ class ChangePasswordDialog(QDialog):
     @staticmethod
     def _password_input(object_name: str) -> QLineEdit:
         field = QLineEdit()
-        field.setMaxLength(255)
+        field.setMaxLength(128)
         field.setEchoMode(QLineEdit.EchoMode.Password)
         field.setObjectName(object_name)
         return field
 
     def _change_password(self) -> None:
-        try:
-            self._service.change_password(
-                self.current_password_input.text(),
-                self.new_password_input.text(),
-                self.confirm_password_input.text(),
-            )
-        except ChangePasswordError as error:
-            QMessageBox.warning(self, "Không thể đổi mật khẩu", str(error))
-            return
-
+        current = self.current_password_input.text()
+        new = self.new_password_input.text()
+        confirm = self.confirm_password_input.text()
         self.current_password_input.clear()
         self.new_password_input.clear()
         self.confirm_password_input.clear()
+        failure = None
+        try:
+            self._service.change_password(current, new, confirm)
+        except ChangePasswordError as error:
+            failure = str(error)
+        finally:
+            current = new = confirm = ""
+
+        if failure is not None:
+            QMessageBox.warning(self, "Không thể đổi mật khẩu", failure)
+            return
         QMessageBox.information(self, "Đổi mật khẩu", "Đổi mật khẩu thành công.")
         self.accept()

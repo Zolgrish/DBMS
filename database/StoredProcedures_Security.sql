@@ -1,9 +1,10 @@
-/* Epic 1.4 SECSP-01..06. Target SQL Server 2022 / compatibility 160; rerunnable DROP/CREATE.
+/* Epics 1.4 SECSP-01..06 / 1.7 PASS-01..05. SQL Server 2022 / compatibility 160; DROP/CREATE.
    Caller context throughout: no EXECUTE AS OWNER, TRUSTWORTHY or shared login.
    nvarchar(max) inputs intentionally prevent silent truncation before checks.
-   Errors 52000..52099 are application-facing and never echo passwords/SQL.
-   Failed mutations roll back the entire transaction, including a caller's
-   outer transaction. No business rows are created/deleted here.
+   Errors 52000..52199 are application-facing and never echo passwords/SQL.
+   Failed account create/delete mutations roll back the entire transaction,
+   including a caller's outer transaction. Self password change uses one ALTER
+   LOGIN without a transaction. No business rows are created/deleted here.
 */
 USE QLDSV;
 GO
@@ -239,6 +240,82 @@ BEGIN
            @BusinessRole AS RoleName;
 END;
 GO
+IF OBJECT_ID(N'dbo.sp_DoiMatKhau', N'P') IS NOT NULL
+    DROP PROCEDURE dbo.sp_DoiMatKhau;
+GO
+CREATE PROCEDURE dbo.sp_DoiMatKhau
+    @OldPassword nvarchar(max),
+    @NewPassword nvarchar(max)
+AS
+BEGIN
+    SET NOCOUNT ON;
+    DECLARE @Login sysname=SUSER_SNAME(), @User sysname=USER_NAME(),
+            @Admin int=ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1),
+            @Lecturer int=ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1),
+            @Student int=ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1),
+            @BusinessRole sysname, @sql nvarchar(max), @Error int;
+    BEGIN TRY
+        -- Same runtime mapping/entity/direct-membership rules as login.
+        -- Reject impersonation, contained/system users and stale SID mappings.
+        IF @Login IS NULL OR @User IS NULL OR ORIGINAL_LOGIN() IS NULL
+           OR @Login<>ORIGINAL_LOGIN() OR @Login<>@User
+           OR NOT EXISTS (
+               SELECT 1 FROM sys.server_principals sp
+               JOIN sys.database_principals dp ON dp.name=sp.name AND dp.sid=sp.sid
+               WHERE sp.name=@Login AND sp.type='S' AND sp.principal_id<>1
+                 AND sp.sid=SUSER_SID() AND dp.name=@User AND dp.type='S'
+                 AND dp.authentication_type=1 AND dp.principal_id>4)
+            THROW 52101, 'Invalid current SQL Login/User identity. Sign in again.', 1;
+        IF @Admin NOT IN (0,1) OR @Lecturer NOT IN (0,1) OR @Student NOT IN (0,1)
+           OR @Admin+@Lecturer+@Student<>1
+            THROW 52101, 'Current identity must resolve to one business role. Sign in again.', 1;
+        SET @BusinessRole=CASE WHEN @Admin=1 THEN N'QLDSV_ADMIN'
+                              WHEN @Lecturer=1 THEN N'QLDSV_GIANGVIEN'
+                              ELSE N'QLDSV_SINHVIEN' END;
+        IF (SELECT COUNT(*) FROM sys.database_role_members
+            WHERE member_principal_id=DATABASE_PRINCIPAL_ID(@User))<>1
+           OR NOT EXISTS (
+               SELECT 1 FROM sys.database_role_members rm
+               JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+               WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(@User)
+                 AND r.name=@BusinessRole AND r.type='R'
+                 AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
+            THROW 52101, 'Current identity must have exactly one direct business role. Sign in again.', 1;
+        IF DATALENGTH(@User)<>20
+           OR ((@Admin=1 OR @Lecturer=1) AND NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV=@User))
+           OR (@Student=1 AND NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV=@User))
+            THROW 52101, 'Current SQL User must identify an existing staff or Student entity. Sign in again.', 1;
+        -- DATALENGTH preserves trailing spaces and counts UTF-16 code units.
+        IF @OldPassword IS NULL OR DATALENGTH(@OldPassword) NOT BETWEEN 2 AND 256
+            THROW 52102, 'Current password rejected.', 1;
+        IF @NewPassword IS NULL OR DATALENGTH(@NewPassword) NOT BETWEEN 2 AND 256
+            THROW 52103, 'New password rejected by SQL Server password requirements.', 1;
+        -- One self-change statement, including OLD_PASSWORD even for Admin.
+        -- No transaction, policy change, elevation or password-reset branch.
+        SET @sql=N'ALTER LOGIN '+QUOTENAME(@Login)+N' WITH PASSWORD = N'''
+            +REPLACE(@NewPassword,N'''',N'''''')+N''' OLD_PASSWORD = N'''
+            +REPLACE(@OldPassword,N'''',N'''''')+N''';';
+        SET @OldPassword=NULL;
+        SET @NewPassword=NULL;
+        EXEC (@sql);
+        SET @sql=NULL;
+    END TRY
+    BEGIN CATCH
+        SET @Error=ERROR_NUMBER();
+        SET @OldPassword=NULL;
+        SET @NewPassword=NULL;
+        SET @sql=NULL;
+        IF @Error IN (52101,52102,52103,52104) THROW;
+        -- 15151 is ambiguous until the identity preflight above has passed.
+        IF @Error=15151
+            THROW 52102, 'Current password or self-change rejected.', 1;
+        IF @Error BETWEEN 15114 AND 15119
+            THROW 52103, 'New password rejected by SQL Server password policy or history.', 1;
+        -- Lockout (15113), unexpected validation (15120) and unknown failures.
+        THROW 52104, 'SQL Server password change failed.', 1;
+    END CATCH;
+END;
+GO
 IF OBJECT_ID(N'dbo.sp_SinhVien_XemDiem', N'P') IS NOT NULL
     DROP PROCEDURE dbo.sp_SinhVien_XemDiem;
 GO
@@ -276,5 +353,8 @@ DENY EXECUTE ON OBJECT::dbo.sp_TaoTaiKhoan TO QLDSV_SINHVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_XoaTaiKhoan TO QLDSV_SINHVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_ThongTinDangNhap TO QLDSV_SINHVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemDiem TO QLDSV_SINHVIEN;
-PRINT N'Epic 1.4: security procedures and object permissions installed (SECSP-01..06).';
+GRANT EXECUTE ON OBJECT::dbo.sp_DoiMatKhau TO QLDSV_ADMIN;
+GRANT EXECUTE ON OBJECT::dbo.sp_DoiMatKhau TO QLDSV_GIANGVIEN;
+GRANT EXECUTE ON OBJECT::dbo.sp_DoiMatKhau TO QLDSV_SINHVIEN;
+PRINT N'Epics 1.4/1.7: security procedures and object permissions installed (SECSP-01..06, PASS-01..05).';
 GO
