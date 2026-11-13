@@ -1,10 +1,12 @@
-"""Student dashboard with access limited to the student score function."""
+"""Student dashboard with access limited to own profile, class, subjects, scores, and password."""
 
 from PySide6.QtWidgets import QMessageBox
 
 from app.models.user import User
+from app.services.role_portal_service import RolePortalService
 from app.services.student_score_service import StudentScoreService
 from app.ui.dashboard_common import DashboardWindow
+from app.ui.student_portal import StudentGradesDialog, StudentProfileDialog
 
 
 class StudentDashboard(DashboardWindow):
@@ -12,15 +14,31 @@ class StudentDashboard(DashboardWindow):
         self,
         user: User,
         score_service: StudentScoreService | None = None,
+        portal_service: RolePortalService | None = None,
     ) -> None:
         super().__init__(
             user,
             "Bảng điều khiển sinh viên",
-            ("Xem điểm", "Đổi mật khẩu"),
+            ("Hồ sơ & Lớp học", "Bảng điểm cá nhân", "Xem điểm", "Đổi mật khẩu"),
         )
         self._score_service = score_service or StudentScoreService()
+        self._portal_service = portal_service or RolePortalService()
 
     def _handle_action(self, action: str) -> None:
+        if action == "Hồ sơ & Lớp học":
+            dialog = StudentProfileDialog(portal_service=self._portal_service, parent=self)
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()
+            return
+        if action == "Bảng điểm cá nhân":
+            dialog = StudentGradesDialog(portal_service=self._portal_service, parent=self)
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()
+            return
         if action == "Xem điểm":
             try:
                 masv = self._score_service.own_masv()
@@ -30,7 +48,7 @@ class StudentDashboard(DashboardWindow):
             QMessageBox.information(
                 self,
                 "Xem điểm",
-                f"Chức năng xem điểm cho sinh viên sẽ được bổ sung sau.",
+                f"Sinh viên {masv}: Vui lòng dùng mục 'Bảng điểm cá nhân' để xem chi tiết điểm.",
             )
             return
         super()._handle_action(action)

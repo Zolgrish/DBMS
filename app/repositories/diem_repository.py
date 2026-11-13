@@ -57,3 +57,12 @@ class DiemRepository:
                     diem,
                 )
 
+    def delete_grade(self, masv: str, mamh: str, lan: int) -> None:
+        with session.qldsv_cursor() as cursor:
+            cursor.execute(
+                "EXEC dbo.sp_Diem_XoaDiem @MASV=?, @MAMH=?, @LAN=?;",
+                masv,
+                mamh,
+                lan,
+            )
+

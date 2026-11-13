@@ -8,6 +8,7 @@ from app.models.diem import DiemSinhvienRow
 from app.models.lop import Lop
 from app.models.monhoc import Monhoc
 from app.repositories.diem_repository import DiemRepository
+from app.services.authorization import require_admin
 from app.utils import session
 
 
@@ -24,6 +25,7 @@ class DiemService:
         54005: "Điểm phải nằm trong khoảng từ 0 đến 10.",
         54006: "Không tìm thấy sinh viên.",
         54007: "Sinh viên đã nghỉ học; không thể nhập điểm.",
+        54008: "Chỉ Admin mới có quyền xóa điểm.",
     }
 
     def __init__(self, diem_repository: DiemRepository | None = None) -> None:
@@ -69,6 +71,15 @@ class DiemService:
             raise DiemServiceError("Không có sinh viên nào để lưu điểm.")
 
         self._execute(self._diems.save_grades, mamh, lan, parsed)
+
+    def delete_grade(self, masv: str, mamh: str, lan: int) -> None:
+        """Admin-only grade deletion; lecturers and students are blocked."""
+        require_admin()
+        masv = masv.strip().upper()
+        mamh = mamh.strip().upper()
+        if not masv or not mamh or lan not in (1, 2):
+            raise DiemServiceError("Thông tin sinh viên, môn học hoặc lần thi không hợp lệ.")
+        self._execute(self._diems.delete_grade, masv, mamh, lan)
 
     @staticmethod
     def parse_grade(raw: str, masv: str = "") -> float | None:

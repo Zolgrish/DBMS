@@ -286,10 +286,53 @@ BEGIN
 END;
 GO
 
+
+IF OBJECT_ID(N'dbo.sp_Diem_XoaDiem', N'P') IS NOT NULL
+    DROP PROCEDURE dbo.sp_Diem_XoaDiem;
+GO
+
+CREATE PROCEDURE dbo.sp_Diem_XoaDiem
+(
+    @MASV NCHAR(10),
+    @MAMH NCHAR(5),
+    @LAN  SMALLINT
+)
+WITH EXECUTE AS OWNER
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SET @MASV = NULLIF(LTRIM(RTRIM(@MASV)), N'');
+    SET @MAMH = NULLIF(LTRIM(RTRIM(@MAMH)), N'');
+
+    IF @MASV IS NULL OR @MAMH IS NULL OR @LAN NOT IN (1, 2)
+        THROW 54002, N'Tham số Mã SV, Môn học hoặc Lần thi không hợp lệ.', 1;
+
+    DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @IsAdmin bit = 0;
+
+    SELECT
+        @IsAdmin = MAX(CASE WHEN r.name = N'QLDSV_ADMIN' THEN 1 ELSE 0 END)
+    FROM sys.database_principals dp
+    JOIN sys.database_role_members rm ON rm.member_principal_id = dp.principal_id
+    JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND r.name = N'QLDSV_ADMIN';
+
+    IF ISNULL(@IsAdmin, 0) <> 1
+        THROW 54008, N'Chỉ Admin mới có quyền xóa điểm.', 1;
+
+    DELETE FROM dbo.Diem
+    WHERE MASV = @MASV AND MAMH = @MAMH AND LAN = @LAN;
+END;
+GO
+
 GRANT EXECUTE ON OBJECT::dbo.sp_Diem_GetLopChoNhapDiem TO QLDSV_ADMIN, QLDSV_GIANGVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_Diem_GetMonHocChoNhapDiem TO QLDSV_ADMIN, QLDSV_GIANGVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_Diem_LayDanhSachNhapDiem TO QLDSV_ADMIN, QLDSV_GIANGVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_Diem_LuuDiem TO QLDSV_ADMIN, QLDSV_GIANGVIEN;
+GRANT EXECUTE ON OBJECT::dbo.sp_Diem_XoaDiem TO QLDSV_ADMIN;
+DENY EXECUTE ON OBJECT::dbo.sp_Diem_XoaDiem TO QLDSV_GIANGVIEN, QLDSV_SINHVIEN;
 GO
 
 PRINT N'Epic 2.5: StoredProcedures_Diem installed successfully.';

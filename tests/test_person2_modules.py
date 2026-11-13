@@ -324,6 +324,35 @@ class Person2UiTests(_SessionTestCase):
             lec_dash._handle_action("Nhập điểm")
             mock_diem_dlg.assert_called_once()
 
+    def test_diem_dialog_hides_delete_and_phancong_for_lecturer(self) -> None:
+        diem_svc = Mock()
+        diem_svc.get_lops_for_grading.return_value = []
+
+        self.set_user(ADMIN)
+        admin_diem = DiemManagementDialog(diem_service=diem_svc)
+        self.addCleanup(admin_diem.close)
+        self.assertFalse(admin_diem.delete_button.isHidden())
+        self.assertFalse(admin_diem.phancong_button.isHidden())
+
+        self.set_user(LECTURER)
+        lec_diem = DiemManagementDialog(diem_service=diem_svc)
+        self.addCleanup(lec_diem.close)
+        self.assertTrue(lec_diem.delete_button.isHidden())
+        self.assertTrue(lec_diem.phancong_button.isHidden())
+
+    def test_delete_grade_requires_admin(self) -> None:
+        repo = Mock()
+        svc = DiemService(diem_repository=repo)
+
+        self.set_user(ADMIN)
+        svc.delete_grade("SV00000001", "CSDL", 1)
+        repo.delete_grade.assert_called_once_with("SV00000001", "CSDL", 1)
+
+        for non_admin in (LECTURER, STUDENT, None):
+            self.set_user(non_admin)
+            with self.assertRaises(PermissionError):
+                svc.delete_grade("SV00000001", "CSDL", 1)
+
 
 if __name__ == "__main__":
     unittest.main()
