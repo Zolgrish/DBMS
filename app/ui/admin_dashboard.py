@@ -15,6 +15,7 @@ from app.ui.diem_management import DiemManagementDialog
 from app.ui.lecturer_management import LecturerManagementDialog
 from app.ui.lop_management import LopManagementDialog
 from app.ui.monhoc_management import MonhocManagementDialog
+from app.ui.phancong_management import PhanCongManagementDialog
 from app.ui.sinhvien_management import SinhvienManagementDialog
 
 
@@ -34,9 +35,11 @@ class AdminDashboard(DashboardWindow):
             user,
             "Bảng điều khiển quản trị",
             (
+                "Quản lý lớp",
                 "Quản lý sinh viên",
                 "Quản lý giảng viên",
                 "Quản lý môn học",
+                "Phân công giảng dạy",
                 "Quản lý tài khoản",
                 "Nhập điểm",
                 "Đổi mật khẩu",
@@ -72,6 +75,13 @@ class AdminDashboard(DashboardWindow):
             return
         if action == "Quản lý môn học":
             dialog = MonhocManagementDialog(monhoc_service=self._monhoc_service, parent=self)
+            try:
+                dialog.exec()
+            finally:
+                dialog.deleteLater()
+            return
+        if action == "Phân công giảng dạy":
+            dialog = PhanCongManagementDialog(parent=self)
             try:
                 dialog.exec()
             finally:

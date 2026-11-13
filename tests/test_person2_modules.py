@@ -310,8 +310,10 @@ class Person2UiTests(_SessionTestCase):
         )
         self.addCleanup(admin_dash.close)
         for action, target_cls in (
+            ("Quản lý lớp", "app.ui.admin_dashboard.LopManagementDialog"),
             ("Quản lý sinh viên", "app.ui.admin_dashboard.SinhvienManagementDialog"),
             ("Quản lý môn học", "app.ui.admin_dashboard.MonhocManagementDialog"),
+            ("Phân công giảng dạy", "app.ui.admin_dashboard.PhanCongManagementDialog"),
             ("Nhập điểm", "app.ui.admin_dashboard.DiemManagementDialog"),
         ):
             with patch(target_cls) as mock_dlg:

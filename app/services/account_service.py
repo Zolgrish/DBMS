@@ -36,6 +36,8 @@ class AccountService:
                "nếu vẫn lỗi, kiểm tra quyền sở hữu và quyền xóa tài khoản.",
         52016: "Danh tính SQL của tài khoản đã thay đổi; thao tác xóa bị từ chối.",
         52017: "Không tìm thấy MAGV hợp lệ gồm 10 ký tự trong danh sách giảng viên.",
+        52018: "Không thể khóa hoặc mở khóa chính tài khoản đang đăng nhập.",
+        52019: "Không thể thay đổi trạng thái tài khoản SQL. Hãy tải lại danh sách và thử lại.",
     }
 
     def __init__(self, account_repository: AccountRepository | None = None) -> None:
@@ -56,6 +58,7 @@ class AccountService:
         password: str | None = None,
         masv: str = "",
         magv: str = "",
+        login_name: str | None = None,
     ) -> bytes:
         require_admin()
         role, masv, magv = role.strip(), masv.strip().upper(), magv.strip().upper()
@@ -69,19 +72,20 @@ class AccountService:
             if magv:
                 raise AccountServiceError("Tài khoản sinh viên không sử dụng MAGV.")
             password = None
-            login_name = masv
+            database_user = masv
         else:
             if not magv:
                 raise AccountServiceError("Tài khoản Admin/GiangVien yêu cầu MAGV.")
             if masv:
                 raise AccountServiceError("Tài khoản Admin/GiangVien không sử dụng MASV.")
-            login_name = magv
+            database_user = magv
             password = password or None
-        self._validate_username(login_name)
+        login_name = login_name.strip() if login_name is not None else database_user
+        self._validate_login_name(login_name)
 
         try:
             # SQL validates the existing entity with locks, collisions and password policy atomically.
-            return self._accounts.create_account(login_name, password, self.SQL_ROLES[role])
+            return self._accounts.create_account(login_name, password, self.SQL_ROLES[role], database_user)
         except session.SessionRequiredError:
             self._raise_session_error()
         except pyodbc.Error as error:
@@ -100,24 +104,43 @@ class AccountService:
             raise AccountServiceError("Tài khoản giảng viên chỉ hỗ trợ Admin hoặc GiangVien.")
         return self.create_account(role=role, password=password, magv=magv)
 
-    def delete_account(self, username: str) -> None:
+    def delete_account(self, login_name: str) -> None:
         require_admin()
-        username = username.strip()
-        self._validate_username(username)
-        if username.casefold() == session.current_user["username"].casefold():
+        login_name = login_name.strip()
+        self._validate_login_name(login_name)
+        if login_name.casefold() == session.current_user.get("login_name", session.current_user["username"]).casefold():
             raise AccountServiceError(self.SQL_ERRORS[52014])
         try:
-            self._accounts.delete_account(username)
+            self._accounts.delete_account(login_name)
+        except session.SessionRequiredError:
+            self._raise_session_error()
+        except pyodbc.Error as error:
+            self._raise_database_error(error)
+
+    def set_account_active(
+        self,
+        login_name: str,
+        active: bool,
+        expected_sid: bytes | None = None,
+    ) -> None:
+        require_admin()
+        login_name = login_name.strip()
+        self._validate_login_name(login_name)
+        current_login = session.current_user.get("login_name", session.current_user["username"])
+        if login_name.casefold() == current_login.casefold():
+            raise AccountServiceError(self.SQL_ERRORS[52018])
+        try:
+            self._accounts.set_account_disabled(login_name, not bool(active), expected_sid)
         except session.SessionRequiredError:
             self._raise_session_error()
         except pyodbc.Error as error:
             self._raise_database_error(error)
 
     @staticmethod
-    def _validate_username(username: str) -> None:
-        if not username:
+    def _validate_login_name(login_name: str) -> None:
+        if not login_name:
             raise AccountServiceError("Tên đăng nhập không được để trống.")
-        if len(username.encode("utf-16-le")) > 256:
+        if len(login_name.encode("utf-16-le")) > 256:
             raise AccountServiceError("Tên đăng nhập không được vượt quá 128 đơn vị UTF-16.")
 
     @staticmethod

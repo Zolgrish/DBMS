@@ -32,8 +32,10 @@ class ChangePasswordDialog(QDialog):
         self.setStyleSheet(DIALOG_STYLE)
 
         layout = QVBoxLayout(self)
-        username = (session.current_user or {}).get("username", "")
-        layout.addWidget(QLabel(f"Tài khoản: {username}"))
+        identity = session.current_user or {}
+        login_name = identity.get("login_name", identity.get("username", ""))
+        database_user = identity.get("username", "")
+        layout.addWidget(QLabel(f"SQL Login: {login_name} | Database User: {database_user}"))
 
         form = QFormLayout()
         form.setSpacing(12)
@@ -43,6 +45,16 @@ class ChangePasswordDialog(QDialog):
         form.addRow("Mật khẩu hiện tại", self.current_password_input)
         form.addRow("Mật khẩu mới", self.new_password_input)
         form.addRow("Xác nhận mật khẩu mới", self.confirm_password_input)
+
+        role = (session.current_user or {}).get("role", "")
+        if role in {"Admin", "GiangVien"}:
+            self.password_policy_hint = QLabel(
+                "Mật khẩu mới phải có ít nhất 8 ký tự và chứa ít nhất 3/4 nhóm: "
+                "chữ hoa (A-Z), chữ thường (a-z), số (0-9), ký tự đặc biệt."
+            )
+            self.password_policy_hint.setObjectName("staffPasswordPolicyHint")
+            self.password_policy_hint.setWordWrap(True)
+            form.addRow(self.password_policy_hint)
 
         buttons = QHBoxLayout()
         buttons.addStretch()

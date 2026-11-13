@@ -43,20 +43,20 @@ def _odbc_value(value: str) -> str:
 
 
 def open_sql_connection(
-    username: str,
+    login_name: str,
     password: str,
     database_override: str | None = None,
     *,
     autocommit: bool = True,
 ):
     """Open a SQL-authenticated connection without retaining or logging credentials."""
-    if not username or not password:
+    if not login_name or not password:
         raise ValueError("Cần tên đăng nhập và mật khẩu SQL Server.")
     parts = (
         ("DRIVER", _required_setting("DB_DRIVER")),
         ("SERVER", _required_setting("DB_SERVER")),
         ("DATABASE", database_override or _required_setting("DB_DATABASE")),
-        ("UID", username),
+        ("UID", login_name),
         ("PWD", password),
     )
     try:
@@ -70,9 +70,9 @@ def open_sql_connection(
         parts = ()
 
 
-def check_database_connection(username: str, password: str) -> str:
+def check_database_connection(login_name: str, password: str) -> str:
     """Check the target database using explicitly supplied SQL credentials."""
-    connection = open_sql_connection(username, password)
+    connection = open_sql_connection(login_name, password)
     try:
         cursor = connection.cursor()
         try:

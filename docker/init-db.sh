@@ -40,11 +40,19 @@ run_security() {
     printf '0x'
     printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | od -An -v -tx1 | tr -d ' \n'
   }
-  export QLDSV_ADMIN_LOGIN_HEX="$(sql_hex "${QLDSV_ADMIN_LOGIN:-GV00000001}")"
+  admin_login="${QLDSV_ADMIN_LOGIN:-GV00000001}"
+  admin_username="${QLDSV_ADMIN_USERNAME:-$admin_login}"
+  student_login="${QLDSV_STUDENT_LOGIN:-SV00000001}"
+  student_username="${QLDSV_STUDENT_USERNAME:-$student_login}"
+  export QLDSV_ADMIN_LOGIN_HEX="$(sql_hex "$admin_login")"
+  export QLDSV_ADMIN_USERNAME_HEX="$(sql_hex "$admin_username")"
   export QLDSV_ADMIN_PASSWORD_HEX="$(sql_hex "${QLDSV_ADMIN_PASSWORD:-}")"
-  export QLDSV_STUDENT_LOGIN_HEX="$(sql_hex "${QLDSV_STUDENT_LOGIN:-SV00000001}")"
+  export QLDSV_STUDENT_LOGIN_HEX="$(sql_hex "$student_login")"
+  export QLDSV_STUDENT_USERNAME_HEX="$(sql_hex "$student_username")"
   run_sql_file "Security.sql"
-  unset QLDSV_ADMIN_PASSWORD_HEX QLDSV_ADMIN_PASSWORD
+  unset QLDSV_ADMIN_PASSWORD_HEX QLDSV_ADMIN_PASSWORD \
+    QLDSV_ADMIN_LOGIN_HEX QLDSV_ADMIN_USERNAME_HEX \
+    QLDSV_STUDENT_LOGIN_HEX QLDSV_STUDENT_USERNAME_HEX
 }
 
 run_sql_file() {
@@ -116,8 +124,22 @@ run_sql_file "seedData.sql"
 run_security
 run_optional_sql_file "StoredProcedures_Security.sql"
 run_sql_file "StoredProcedures_Lecturer.sql"
+run_sql_file "StoredProcedures_Roles.sql"
+run_sql_file "StoredProcedures_Diem.sql"
 
 echo "[db-init] Verifying QLDSV objects ..."
+sqlcmd_sa -d QLDSV -Q "SET NOCOUNT ON;
+IF OBJECT_ID(N'dbo.sp_GiangVien_XemHoSo', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_GiangVien_XemPhanCong', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_GiangVien_XemSinhVienLop', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_SinhVien_XemHoSoVaLop', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_SinhVien_XemMonHoc', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_Diem_GetLopChoNhapDiem', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_Diem_GetMonHocChoNhapDiem', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_Diem_LayDanhSachNhapDiem', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_Diem_LuuDiem', N'P') IS NULL
+   OR OBJECT_ID(N'dbo.sp_Diem_XoaDiem', N'P') IS NULL
+    THROW 50001, 'Required role/grading stored procedures are missing after bootstrap.', 1;"
 sqlcmd_sa -d QLDSV -Q "SET NOCOUNT ON; SELECT name AS TableName FROM sys.tables WHERE name IN (N'Lop',N'Sinhvien',N'Giangvien',N'Monhoc',N'Diem',N'PhanCong') ORDER BY name; SELECT name AS ProcedureName FROM sys.procedures WHERE name LIKE N'sp[_]%' ORDER BY name;"
 
 echo "[db-init] QLDSV initialization completed successfully."

@@ -39,26 +39,26 @@ def check(condition, message):
         raise RuntimeError(message)
 
 
-def assert_absent(connection, name):
+def assert_absent(connection, login_name, database_user):
     rows = query(connection, """
 SELECT (SELECT COUNT(*) FROM sys.server_principals WHERE name=?),
        (SELECT COUNT(*) FROM sys.database_principals WHERE name=?);
-""", name, name)
+""", login_name, database_user)
     check(len(rows) == 1 and tuple(rows[0]) == (0, 0),
           "Disposable Login/User is not absent; preexisting principals are never reused")
 
 
-def account_snapshot(connection, name, role, sid):
+def account_snapshot(connection, login_name, database_user, role, sid):
     rows = query(connection, """
 SELECT sp.sid, dp.sid, sl.is_policy_checked, sl.is_expiration_checked, sl.is_disabled,
        (SELECT COUNT(*) FROM sys.database_role_members WHERE member_principal_id=dp.principal_id)
 FROM sys.server_principals sp
 JOIN sys.sql_logins sl ON sl.principal_id=sp.principal_id
-JOIN sys.database_principals dp ON dp.name=sp.name AND dp.sid=sp.sid
+JOIN sys.database_principals dp ON dp.sid=sp.sid
 JOIN sys.database_role_members rm ON rm.member_principal_id=dp.principal_id
 JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-WHERE sp.name=? AND sp.type='S' AND dp.type='S' AND dp.authentication_type=1 AND r.name=?;
-""", name, role)
+WHERE sp.name=? AND dp.name=? AND sp.type='S' AND dp.type='S' AND dp.authentication_type=1 AND r.name=?;
+""", login_name, database_user, role)
     check(len(rows) == 1 and rows[0][0] == sid and rows[0][1] == sid
           and not rows[0][4] and rows[0][5] == 1, "Disposable mapping/SID/role changed")
     # Non-Admin callers need no visibility grant on the technical server role.
@@ -67,27 +67,27 @@ SELECT r.name FROM sys.server_role_members rm
 JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
 JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
 WHERE m.name=?;
-""", name)
+""", login_name)
     expected = {"QLDSV_ACCOUNT_ADMIN", "dbcreator"} if role == "QLDSV_ADMIN" else set()
     server_roles = {row[0] for row in memberships}
     check(server_roles == expected, "Unexpected server-role memberships")
     return tuple(rows[0]) + (tuple(sorted(server_roles)),)
 
 
-def assert_identity(name, role):
+def assert_identity(login_name, database_user, role):
     rows = query(session.require_qldsv_connection(), "EXEC dbo.sp_ThongTinDangNhap;")
-    check(len(rows) == 1 and tuple(rows[0]) == (name, name, role), "Business identity/role changed")
+    check(len(rows) == 1 and tuple(rows[0]) == (login_name, database_user, role), "Business identity/role changed")
     check(not any("password" in key.lower() for key in session.current_user), "Credential retained in session")
 
 
-def verify_self_change(control, name, role, sid, initial_password):
+def verify_self_change(control, login_name, database_user, role, sid, initial_password):
     new_password = " Change17'Aa9!" + secrets.token_hex(20) + " "
     wrong_password = "Wrong17#Aa9!" + secrets.token_hex(20)
     try:
-        user = AuthService().login(name, initial_password)
-        check(user.username == name, "Initial application login failed")
-        assert_identity(name, role)
-        before = account_snapshot(control, name, role, sid)
+        user = AuthService().login(login_name, initial_password)
+        check(user.login_name == login_name and user.username == database_user, "Initial application login failed")
+        assert_identity(login_name, database_user, role)
+        before = account_snapshot(control, login_name, database_user, role, sid)
         expected_policy = role != "QLDSV_SINHVIEN"
         check(bool(before[2]) == expected_policy, "Unexpected initial SQL password policy")
         privileges = query(session.require_qldsv_connection(),
@@ -103,25 +103,25 @@ def verify_self_change(control, name, role, sid, initial_password):
             raise RuntimeError("Wrong OLD_PASSWORD unexpectedly succeeded")
         wrong_password = ""
         session.clear_session()
-        AuthService().login(name, initial_password)  # Wrong-old attempt preserved credential.
-        assert_identity(name, role)
+        AuthService().login(login_name, initial_password)  # Wrong-old attempt preserved credential.
+        assert_identity(login_name, database_user, role)
         active = session.require_qldsv_connection()
         service.change_password(initial_password, new_password, new_password)
         check(session.require_qldsv_connection() is active, "Password change replaced the authenticated session")
-        assert_identity(name, role)  # Existing connection remains usable after ALTER LOGIN.
-        check(account_snapshot(control, name, role, sid) == before, "Mapping/role/policy changed")
+        assert_identity(login_name, database_user, role)  # Existing connection remains usable after ALTER LOGIN.
+        check(account_snapshot(control, login_name, database_user, role, sid) == before, "Mapping/role/policy changed")
         session.clear_session()
         try:
-            AuthService().login(name, initial_password)  # Pooling is disabled by app config.
+            AuthService().login(login_name, initial_password)  # Pooling is disabled by app config.
         except InvalidCredentialsError:
             pass
         else:
             raise RuntimeError("Fresh login with OLD password unexpectedly succeeded")
         initial_password = ""
-        AuthService().login(name, new_password)
+        AuthService().login(login_name, new_password)
         new_password = ""
-        assert_identity(name, role)
-        check(account_snapshot(control, name, role, sid) == before, "Final mapping/role/policy changed")
+        assert_identity(login_name, database_user, role)
+        check(account_snapshot(control, login_name, database_user, role, sid) == before, "Final mapping/role/policy changed")
         print("PASS " + role + ": wrong-old rejected, live session usable, fresh OLD denied/NEW accepted; identity/policy unchanged")
     finally:
         initial_password = new_password = wrong_password = ""
@@ -146,26 +146,27 @@ IF (SELECT COUNT(*) FROM sys.database_permissions p
       AND r.name IN(N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))<>3
     THROW 53110, 'All three object-specific password-change grants are required.', 1;
 """)
-    check(len({name.casefold() for name, _ in principals}) == len(principals), "Disposable identities must be distinct")
-    for name, role in principals:
-        assert_absent(control, name)
+    check(len({login.casefold() for login, _, _ in principals}) == len(principals), "Disposable logins must be distinct")
+    check(len({identity.casefold() for _, identity, _ in principals}) == len(principals), "Disposable database users must be distinct")
+    for login_name, database_user, role in principals:
+        assert_absent(control, login_name, database_user)
         sql = ("SELECT 1 FROM dbo.Sinhvien WHERE MASV=?;" if role == "QLDSV_SINHVIEN"
                else "SELECT 1 FROM dbo.Giangvien WHERE MAGV=?;")
-        check(query(control, sql, name), "Disposable identity requires an existing business row")
+        check(query(control, sql, database_user), "Disposable identity requires an existing business row")
 
 
 def main():
     admin = os.getenv("QLDSV_ADMIN_LOGIN", "GV00000001")
-    check(len(admin.encode("utf-16-le")) == 20, "Application Admin must be an existing 10-unit MAGV; system logins are forbidden")
+    check(admin.lower() not in {"sa", "dbo"} and bool(admin.strip()), "Application Admin must be a mapped SQL Login; system logins are forbidden")
     password = os.getenv("QLDSV_ADMIN_PASSWORD")
     if not password:
         if not sys.stdin.isatty():
             raise RuntimeError("BLOCKED: current Admin password unavailable; no guessing or reset")
         password = getpass.getpass("Current application Admin SQL password: ")
     principals = (
-        (os.getenv("QLDSV_VERIFY_STUDENT", "SV00000002"), "QLDSV_SINHVIEN"),
-        (os.getenv("QLDSV_VERIFY_LECTURER", "GV00000002"), "QLDSV_GIANGVIEN"),
-        (os.getenv("QLDSV_VERIFY_ADMIN", "GV00000003"), "QLDSV_ADMIN"),
+        (os.getenv("QLDSV_VERIFY_STUDENT_LOGIN", "verify_student_02"), os.getenv("QLDSV_VERIFY_STUDENT", "SV00000002"), "QLDSV_SINHVIEN"),
+        (os.getenv("QLDSV_VERIFY_LECTURER_LOGIN", "verify_lecturer_02"), os.getenv("QLDSV_VERIFY_LECTURER", "GV00000002"), "QLDSV_GIANGVIEN"),
+        (os.getenv("QLDSV_VERIFY_ADMIN_LOGIN", "verify_admin_03"), os.getenv("QLDSV_VERIFY_ADMIN", "GV00000003"), "QLDSV_ADMIN"),
     )
     control = None
     owned = {}
@@ -173,26 +174,26 @@ def main():
     initial_password = ""
     try:
         user = AuthService().login(admin, password)
-        check(user.role == "Admin" and user.magv == admin, "Real mapped application Admin required")
+        check(user.role == "Admin" and user.login_name == admin and user.username == user.magv, "Real mapped application Admin required")
         control = open_sql_connection(admin, password)
         password = ""
         preflight(control, principals)  # All prerequisites pass before any mutation.
         session.clear_session()
-        for name, role in principals:
-            print("Disposable identity: " + name + " (" + role + ")", flush=True)
+        for name, database_user, role in principals:
+            print("Disposable identity: " + name + " -> " + database_user + " (" + role + ")", flush=True)
             initial_password = "123456" if role == "QLDSV_SINHVIEN" else " Initial17'Aa9!" + secrets.token_hex(20) + " "
             uncertain.add(name)
             rows = query(control, """
 SET NOCOUNT ON;
 DECLARE @CreatedSid varbinary(85);
-EXEC dbo.sp_TaoTaiKhoan @LoginName=?,@Role=?,@Password=?,@CreatedSid=@CreatedSid OUTPUT;
+EXEC dbo.sp_TaoTaiKhoan @LoginName=?,@DatabaseUser=?,@Role=?,@Password=?,@CreatedSid=@CreatedSid OUTPUT;
 SELECT @CreatedSid;
-""", name, role, None if role == "QLDSV_SINHVIEN" else initial_password)
+""", name, database_user, role, None if role == "QLDSV_SINHVIEN" else initial_password)
             check(len(rows) == 1 and isinstance(rows[0][0], bytes) and bool(rows[0][0]), "Create returned no ownership SID")
             sid = rows[0][0]
             owned[name] = sid
             uncertain.remove(name)
-            verify_self_change(control, name, role, sid, initial_password)
+            verify_self_change(control, name, database_user, role, sid, initial_password)
             initial_password = ""
         print("PASS Epic 1.7 real-principal checks for all three roles; cleanup follows")
     finally:
@@ -205,7 +206,8 @@ SELECT @CreatedSid;
             for name, sid in reversed(list(owned.items())):
                 try:
                     query(control, "EXEC dbo.sp_XoaTaiKhoan @LoginName=?,@ExpectedSid=?;", name, sid)
-                    assert_absent(control, name)
+                    database_user = next(identity for login, identity, _ in principals if login == name)
+                    assert_absent(control, name, database_user)
                     print("PASS SID-guarded cleanup: " + name)
                 except Exception:
                     cleanup_failed = True

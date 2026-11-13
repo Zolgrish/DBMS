@@ -20,6 +20,8 @@ CONTAINER = "qldsv-sqlserver"
 SQLCMD = "/opt/mssql-tools18/bin/sqlcmd"
 ADMIN = os.environ.get("QLDSV_ADMIN_LOGIN", "GV00000001")
 STUDENT = os.environ.get("QLDSV_STUDENT_LOGIN", "SV00000001")
+ADMIN_USER = os.environ.get("QLDSV_ADMIN_USERNAME") or ADMIN
+STUDENT_USER = os.environ.get("QLDSV_STUDENT_USERNAME") or STUDENT
 
 
 def run(args, *, data=None, env=None):
@@ -60,7 +62,8 @@ def sql(login, password, query, *, sa=False, expect_success=True):
     return result
 
 
-def checked(query, role, login):
+def checked(query, role, login, database_user=None):
+    database_user = database_user or (ADMIN_USER if login == ADMIN else STUDENT_USER if login == STUDENT else login)
     exclusive = "\n".join(
         f"IF ISNULL(IS_ROLEMEMBER({literal(other)}),-1)<>0 THROW 51100, 'Ambiguous business role.', 1;"
         for other in ("QLDSV_ADMIN", "QLDSV_GIANGVIEN", "QLDSV_SINHVIEN") if other != role
@@ -69,7 +72,10 @@ def checked(query, role, login):
 SET NOCOUNT ON; SET XACT_ABORT ON;
 {exclusive}
 IF ORIGINAL_LOGIN() <> {literal(login)} OR SUSER_SNAME() <> {literal(login)}
-   OR USER_NAME() <> {literal(login)}
+   OR USER_NAME() <> {literal(database_user)}
+   OR NOT EXISTS (SELECT 1 FROM sys.database_principals
+                  WHERE name=USER_NAME() AND sid=SUSER_SID()
+                    AND type='S' AND authentication_type=1)
     THROW 51100, 'Login/database user mapping mismatch.', 1;
 IF ISNULL(IS_ROLEMEMBER({literal(role)}), -1) <> 1
     THROW 51100, 'Expected business role missing.', 1;
@@ -190,10 +196,10 @@ IF (SELECT COUNT(*) FROM sys.database_principals
     WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
       AND type='R' AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
     THROW 51104, 'Require three business roles owned by dbo.', 1;
-IF NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV={literal(ADMIN)})
- OR NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV={literal(STUDENT)})
+IF NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV={literal(ADMIN_USER)})
+ OR NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV={literal(STUDENT_USER)})
     THROW 51104, 'Bootstrap principals must match MAGV/MASV entities.', 1;
-IF EXISTS (SELECT 1 FROM sys.database_principals u WHERE u.name IN ({literal(ADMIN)},{literal(STUDENT)})
+IF EXISTS (SELECT 1 FROM sys.database_principals u WHERE u.name IN ({literal(ADMIN_USER)},{literal(STUDENT_USER)})
            AND (SELECT COUNT(*) FROM sys.database_role_members rm
                 JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
                 WHERE rm.member_principal_id=u.principal_id
@@ -201,14 +207,14 @@ IF EXISTS (SELECT 1 FROM sys.database_principals u WHERE u.name IN ({literal(ADM
     THROW 51104, 'Bootstrap principal has ambiguous business roles.', 1;
 IF EXISTS (SELECT 1 FROM sys.database_role_members rm
            JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-           WHERE (rm.member_principal_id=DATABASE_PRINCIPAL_ID({literal(ADMIN)}) AND r.name<>N'QLDSV_ADMIN')
-              OR (rm.member_principal_id=DATABASE_PRINCIPAL_ID({literal(STUDENT)}) AND r.name<>N'QLDSV_SINHVIEN'))
+           WHERE (rm.member_principal_id=DATABASE_PRINCIPAL_ID({literal(ADMIN_USER)}) AND r.name<>N'QLDSV_ADMIN')
+              OR (rm.member_principal_id=DATABASE_PRINCIPAL_ID({literal(STUDENT_USER)}) AND r.name<>N'QLDSV_SINHVIEN'))
     THROW 51104, 'Bootstrap principal has conflicting role membership.', 1;
 IF EXISTS (SELECT 1 FROM sys.server_role_members rm
            JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
            JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
            WHERE r.name=N'QLDSV_ACCOUNT_ADMIN' AND NOT EXISTS (
-             SELECT 1 FROM sys.database_principals u WHERE u.name=m.name AND u.sid=m.sid AND u.type='S'
+             SELECT 1 FROM sys.database_principals u WHERE u.sid=m.sid AND u.type='S'
              AND u.authentication_type=1 AND m.type='S' AND m.principal_id<>1
              AND ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN',u.name),-1)=1
              AND ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN',u.name),-1)=0
@@ -220,18 +226,18 @@ IF EXISTS (SELECT 1 FROM sys.server_role_members rm JOIN sys.server_principals p
            ON p.principal_id=rm.member_principal_id WHERE p.name={literal(STUDENT)})
     THROW 51104, 'Student has a server role.', 1;
 IF EXISTS (
-    SELECT 1 FROM (VALUES ({literal(ADMIN)}, {literal(admin_role)}),
-                         ({literal(STUDENT)}, {literal(student_role)})) AS expected(LoginName, RoleName)
+    SELECT 1 FROM (VALUES ({literal(ADMIN)}, {literal(ADMIN_USER)}, {literal(admin_role)}),
+                         ({literal(STUDENT)}, {literal(STUDENT_USER)}, {literal(student_role)})) AS expected(LoginName, DatabaseUser, RoleName)
     WHERE NOT EXISTS (
         SELECT 1 FROM sys.server_principals sp
         JOIN sys.database_principals dp ON dp.sid=sp.sid
         JOIN sys.database_role_members rm ON rm.member_principal_id=dp.principal_id
         JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-        WHERE sp.name=expected.LoginName AND dp.name=expected.LoginName
+        WHERE sp.name=expected.LoginName AND dp.name=expected.DatabaseUser
           AND sp.type='S' AND dp.type='S' AND r.type='R' AND r.name=expected.RoleName))
     THROW 51104, 'Expected Login/User SID mapping or business role membership is missing.', 1;
 IF EXISTS (SELECT 1 FROM sys.database_role_members
-           WHERE member_principal_id=DATABASE_PRINCIPAL_ID({literal(STUDENT)})
+           WHERE member_principal_id=DATABASE_PRINCIPAL_ID({literal(STUDENT_USER)})
              AND role_principal_id=DATABASE_PRINCIPAL_ID(N'QLDSV_ADMIN'))
     THROW 51104, 'Student must not belong to QLDSV_ADMIN.', 1;
 SELECT sp.name,sp.type_desc,dp.name AS DatabaseUser,r.name AS BusinessRole
@@ -247,7 +253,7 @@ WHERE p.grantee_principal_id=DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN');
 def metadata():
     result = sql("sa", None, metadata_query(), sa=True)
     print(result.stdout.strip())
-    print("PASS metadata: Mixed Mode, same-name SID mappings, three dbo-owned roles and Student denials; no TaiKhoan")
+    print("PASS metadata: Mixed Mode, Login/User SID mappings, three dbo-owned roles and Student denials; no TaiKhoan")
 
 
 def verify_backup_restore(password):
@@ -300,8 +306,10 @@ def verify_conflict_guards():
     ]
     for description, setup, error in scenarios:
         query = bootstrap.replace("$(QLDSV_ADMIN_LOGIN_HEX)", hex_value(temporary))
+        query = query.replace("$(QLDSV_ADMIN_USERNAME_HEX)", hex_value(temporary))
         query = query.replace("$(QLDSV_ADMIN_PASSWORD_HEX)", hex_value(password))
         query = query.replace("$(QLDSV_STUDENT_LOGIN_HEX)", hex_value(STUDENT))
+        query = query.replace("$(QLDSV_STUDENT_USERNAME_HEX)", hex_value(STUDENT_USER))
         result = sql("sa", None, setup + "GO\n" + query, sa=True, expect_success=False)
         if result.returncode == 0 or ("Msg " + error) not in result.stdout + result.stderr:
             raise RuntimeError("Conflict guard failed: " + description)
@@ -356,15 +364,18 @@ CREATE LOGIN {identifier(temporary)} WITH PASSWORD={literal(password)}, CHECK_PO
 """)
         env = os.environ.copy()
         env.update(QLDSV_ADMIN_LOGIN_HEX=hex_value(temporary),
+                   QLDSV_ADMIN_USERNAME_HEX=hex_value(temporary),
                    QLDSV_ADMIN_PASSWORD_HEX=hex_value("Ignored#" + secrets.token_hex(20) + "!"),
-                   QLDSV_STUDENT_LOGIN_HEX=hex_value(STUDENT))
+                   QLDSV_STUDENT_LOGIN_HEX=hex_value(STUDENT),
+                   QLDSV_STUDENT_USERNAME_HEX=hex_value(STUDENT_USER))
         # Run only Security.sql: an expected rejection must not recreate the
         # real common procedures or seed data. This also proves the freshly
         # built image contains the working tree's new policy guard.
         result = run([
             "docker", "compose", "run", "--rm", "--no-deps",
-            "-e", "QLDSV_ADMIN_LOGIN_HEX", "-e", "QLDSV_ADMIN_PASSWORD_HEX",
-            "-e", "QLDSV_STUDENT_LOGIN_HEX", "--entrypoint", "/bin/bash", "db-init", "-c",
+            "-e", "QLDSV_ADMIN_LOGIN_HEX", "-e", "QLDSV_ADMIN_USERNAME_HEX",
+            "-e", "QLDSV_ADMIN_PASSWORD_HEX", "-e", "QLDSV_STUDENT_LOGIN_HEX",
+            "-e", "QLDSV_STUDENT_USERNAME_HEX", "--entrypoint", "/bin/bash", "db-init", "-c",
             'export SQLCMDPASSWORD="$MSSQL_SA_PASSWORD"; exec ' + SQLCMD
             + ' -S "$DB_HOST,$DB_PORT" -U sa -C -b -r1 -i /opt/qldsv/database/Security.sql',
         ], env=env)
@@ -424,7 +435,8 @@ def main():
         change_student(admin_password, changed_password)
         verify_student(changed_password)
         env = os.environ.copy()
-        env.update(QLDSV_ADMIN_LOGIN=ADMIN, QLDSV_STUDENT_LOGIN=STUDENT,
+        env.update(QLDSV_ADMIN_LOGIN=ADMIN, QLDSV_ADMIN_USERNAME=ADMIN_USER,
+                   QLDSV_STUDENT_LOGIN=STUDENT, QLDSV_STUDENT_USERNAME=STUDENT_USER,
                    QLDSV_ADMIN_PASSWORD=replacement_admin)
         for iteration in (1, 2):
             result = run(["docker", "compose", "run", "--rm", "--no-deps", "db-init"], env=env)

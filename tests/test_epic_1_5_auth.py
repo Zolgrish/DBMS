@@ -97,20 +97,25 @@ class Epic15Tests(unittest.TestCase):
         self.assertFalse(any("password" in key.lower() for key in vars(session)))
 
     def test_student_masv_is_database_user_and_has_no_master_connection(self):
-        connection = Connection([("SV00000002", "SV00000002", "QLDSV_SINHVIEN")])
+        connection = Connection([("student-login", "SV00000002", "QLDSV_SINHVIEN")])
         with patch("app.services.auth_service.open_sql_connection", return_value=connection) as connect:
-            user = AuthService().login("SV00000002", "123456")
+            user = AuthService().login("student-login", "123456")
         self.assertEqual((user.role, user.masv, user.magv), ("SinhVien", "SV00000002", None))
+        self.assertEqual((user.login_name, user.username), ("student-login", "SV00000002"))
+        self.assertEqual((session.current_user["login_name"], session.current_user["username"]),
+                         ("student-login", "SV00000002"))
+        connect.assert_called_once_with("student-login", "123456", autocommit=True)
         self.assertEqual(connect.call_count, 1)
         with self.assertRaises(session.SessionRequiredError):
             session.require_master_connection()
 
     def test_lecturer_magv_comes_from_database_user_and_never_opens_master(self):
-        connection = Connection([("GV00000002", "GV00000002", "QLDSV_GIANGVIEN")])
+        connection = Connection([("lecturer-login", "GV00000002", "QLDSV_GIANGVIEN")])
         with patch("app.services.auth_service.open_sql_connection", return_value=connection) as connect:
-            user = AuthService().login("GV00000002", "runtime-secret")
+            user = AuthService().login("lecturer-login", "runtime-secret")
         self.assertEqual((user.role, user.magv, user.masv), ("GiangVien", "GV00000002", None))
-        connect.assert_called_once_with("GV00000002", "runtime-secret", autocommit=True)
+        self.assertEqual((user.login_name, user.username), ("lecturer-login", "GV00000002"))
+        connect.assert_called_once_with("lecturer-login", "runtime-secret", autocommit=True)
         with self.assertRaises(session.SessionRequiredError):
             session.require_master_connection()
         self.assertNotIn("runtime-secret", repr(session.current_user))
@@ -247,10 +252,12 @@ class Epic15Tests(unittest.TestCase):
         self.assertEqual((connection.closed, connection.statement.closed), (1, 1))
 
     def test_user_full_name_joins_remain_available_with_sql_metadata(self):
-        connection = Connection([("SV00000002", "QLDSV_SINHVIEN", "SV00000002", None, False, "Nguyen", "An", None, None)])
+        connection = Connection([("student-login", "SV00000002", "QLDSV_SINHVIEN", "SV00000002", None,
+                                  False, "Nguyen", "An", None, None, b"student-sid")])
         session.set_authenticated(ADMIN, connection)
         accounts = AccountRepository().find_all_accounts()
         self.assertEqual(accounts[0].full_name, "Nguyen An")
+        self.assertEqual((accounts[0].login_name, accounts[0].username), ("student-login", "SV00000002"))
         self.assertIn("LEFT JOIN dbo.Sinhvien", connection.statement.calls[0][0])
         self.assertIn("LEFT JOIN dbo.Giangvien", connection.statement.calls[0][0])
         self.assertEqual(connection.closed, 0)
@@ -380,7 +387,8 @@ class Epic15Tests(unittest.TestCase):
 
     def test_account_management_delete_callback_handles_connection_loss(self):
         from app.ui.account_management import AccountManagementDialog
-        qldsv = Connection([("other", "QLDSV_ADMIN", None, None, False, None, None, None, None)])
+        qldsv = Connection([("other", "GV00000002", "QLDSV_ADMIN", None, "GV00000002",
+                             False, None, None, None, None, b"other-sid")])
         master = Connection()
         session.set_authenticated(ADMIN, qldsv, master)
         dialog = AccountManagementDialog(AccountService())

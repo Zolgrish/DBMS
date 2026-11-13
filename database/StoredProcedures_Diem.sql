@@ -29,8 +29,26 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
     DECLARE @IsAdmin bit = 0;
     DECLARE @IsGV bit = 0;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 54001, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
 
     SELECT
         @IsAdmin = MAX(CASE WHEN r.name = N'QLDSV_ADMIN' THEN 1 ELSE 0 END),
@@ -54,7 +72,7 @@ BEGIN
         SELECT DISTINCT l.MALOP, l.TENLOP
         FROM dbo.Lop l
         JOIN dbo.PhanCong pc ON pc.MALOP = l.MALOP
-        WHERE pc.MAGV = @Caller
+        WHERE pc.MAGV = @DatabaseUser
         ORDER BY l.MALOP;
         RETURN;
     END;
@@ -79,8 +97,26 @@ BEGIN
 
     SET @MALOP = NULLIF(LTRIM(RTRIM(@MALOP)), N'');
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
     DECLARE @IsAdmin bit = 0;
     DECLARE @IsGV bit = 0;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 54001, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
 
     SELECT
         @IsAdmin = MAX(CASE WHEN r.name = N'QLDSV_ADMIN' THEN 1 ELSE 0 END),
@@ -104,7 +140,7 @@ BEGIN
         SELECT DISTINCT mh.MAMH, mh.TENMH, mh.SoTCLT, mh.SoTCTH
         FROM dbo.Monhoc mh
         JOIN dbo.PhanCong pc ON pc.MAMH = mh.MAMH
-        WHERE pc.MAGV = @Caller
+        WHERE pc.MAGV = @DatabaseUser
           AND (@MALOP IS NULL OR pc.MALOP = @MALOP)
         ORDER BY mh.MAMH;
         RETURN;
@@ -137,8 +173,26 @@ BEGIN
         THROW 54002, N'Tham số Lớp, Môn học hoặc Lần thi không hợp lệ.', 1;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
     DECLARE @IsAdmin bit = 0;
     DECLARE @IsGV bit = 0;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 54001, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
 
     SELECT
         @IsAdmin = MAX(CASE WHEN r.name = N'QLDSV_ADMIN' THEN 1 ELSE 0 END),
@@ -156,7 +210,7 @@ BEGIN
     BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM dbo.PhanCong
-            WHERE MAGV = @Caller AND MALOP = @MALOP AND MAMH = @MAMH
+            WHERE MAGV = @DatabaseUser AND MALOP = @MALOP AND MAMH = @MAMH
         )
             THROW 54004, N'Bạn không được phân công giảng dạy lớp và môn học này.', 1;
     END;
@@ -248,8 +302,26 @@ BEGIN
         THROW 54007, N'Sinh viên đã nghỉ học; không thể nhập điểm.', 1;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
     DECLARE @IsAdmin bit = 0;
     DECLARE @IsGV bit = 0;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 54001, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
 
     SELECT
         @IsAdmin = MAX(CASE WHEN r.name = N'QLDSV_ADMIN' THEN 1 ELSE 0 END),
@@ -267,7 +339,7 @@ BEGIN
     BEGIN
         IF NOT EXISTS (
             SELECT 1 FROM dbo.PhanCong
-            WHERE MAGV = @Caller AND MALOP = @MALOP AND MAMH = @MAMH
+            WHERE MAGV = @DatabaseUser AND MALOP = @MALOP AND MAMH = @MAMH
         )
             THROW 54004, N'Bạn không được phân công giảng dạy lớp và môn học này.', 1;
     END;

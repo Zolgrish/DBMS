@@ -26,14 +26,14 @@ from app.ui.lecturer_dashboard import LecturerDashboard
 from app.utils import session
 
 
-ADMIN = User("GV00000001", "Admin", None, "GV00000001", True)
+ADMIN = User("GV00000001", "Admin", None, "GV00000001", True, login_name="admin_sql_login")
 SQL_DIR = "/var/opt/mssql/backups"
 SQL_FILE = SQL_DIR + "/example.bak"
 STAMP = datetime(2026, 10, 26, 8, 0)
 COLUMNS = ("DatabaseName", "BackupType", "Position", "UserName", "BackupStartDate", "BackupFinishDate")
 
 
-def backup_set(position=1, database_name="QLDSV", backup_type=1, finish=STAMP, user="GV00000001"):
+def backup_set(position=1, database_name="QLDSV", backup_type=1, finish=STAMP, user="admin_sql_login"):
     return BackupSet(database_name, backup_type, position, user, finish - timedelta(minutes=1), finish)
 
 
@@ -462,7 +462,7 @@ class BackupVerifierTests(unittest.TestCase):
         for value in ("", "yes", "YES ", "1"):
             with patch.dict(os.environ, {"QLDSV_ALLOW_LIVE_RESTORE": value}), patch.object(self.verifier, "query") as query:
                 with self.assertRaisesRegex(RuntimeError, "requires exact"):
-                    self.verifier.restore_acceptance(Mock(), Mock(), ADMIN.username, "unit-password")
+                    self.verifier.restore_acceptance(Mock(), Mock(), ADMIN.login_name, "unit-password")
                 query.assert_not_called()
 
     def test_default_main_creates_lists_verifies_and_cleans_only_owned_backup(self):
@@ -473,7 +473,8 @@ class BackupVerifierTests(unittest.TestCase):
             unrelated.write_bytes(b"keep")
             service = BackupRestoreService(FakeBackupRepository(host), host, SQL_DIR)
             session.set_current_user(ADMIN)
-            with patch.dict(os.environ, {"QLDSV_ADMIN_PASSWORD": "unit-password", "QLDSV_ALLOW_LIVE_RESTORE": ""}), \
+            with patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": ADMIN.login_name, "QLDSV_ADMIN_USERNAME": ADMIN.username,
+                                         "QLDSV_ADMIN_PASSWORD": "unit-password", "QLDSV_ALLOW_LIVE_RESTORE": ""}), \
                     patch.object(verifier, "AuthService") as auth, patch.object(verifier, "BackupRestoreService", return_value=service), \
                     patch.object(verifier, "preflight", return_value=host), patch.object(verifier, "audit_nonadmin_permissions"), \
                     patch.object(verifier, "restore_acceptance") as restore, patch("builtins.print"):
@@ -500,7 +501,8 @@ class BackupVerifierTests(unittest.TestCase):
             host = Path(directory).resolve()
             service = BackupRestoreService(FakeBackupRepository(host), host, SQL_DIR)
             session.set_current_user(ADMIN)
-            with patch.dict(os.environ, {"QLDSV_ADMIN_PASSWORD": "unit-password", "QLDSV_ALLOW_LIVE_RESTORE": "YES"}), \
+            with patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": ADMIN.login_name, "QLDSV_ADMIN_USERNAME": ADMIN.username,
+                                         "QLDSV_ADMIN_PASSWORD": "unit-password", "QLDSV_ALLOW_LIVE_RESTORE": "YES"}), \
                     patch.object(verifier, "AuthService") as auth, patch.object(verifier, "BackupRestoreService", return_value=service), \
                     patch.object(verifier, "preflight", return_value=host), patch.object(verifier, "audit_nonadmin_permissions"), \
                     patch.object(verifier, "restore_acceptance", side_effect=RuntimeError("test failure")), \
@@ -545,11 +547,11 @@ class BackupVerifierTests(unittest.TestCase):
                 patch.object(verifier.uuid, "uuid4", return_value=token), patch.object(verifier, "AuthService") as auth, \
                 patch.object(verifier, "cleanup_probe") as cleanup, patch("builtins.print"):
             auth.return_value.login.side_effect = login
-            verifier.restore_acceptance(service, item, ADMIN.username, "unit-password")
+            verifier.restore_acceptance(service, item, ADMIN.login_name, "unit-password")
         self.assertEqual(operations, ["probe", "restore", "reauthenticate", "absence"])
         service.verify_backup.assert_called_once_with("owned.bak", 3)
         service.restore_database.assert_called_once_with("owned.bak", 3)
-        auth.return_value.login.assert_called_once_with(ADMIN.username, "unit-password")
+        auth.return_value.login.assert_called_once_with(ADMIN.login_name, "unit-password")
         self.assertEqual(core.call_count, 2)
         cleanup.assert_not_called()
 
@@ -560,7 +562,7 @@ class BackupVerifierTests(unittest.TestCase):
                 patch.object(self.verifier, "check_core_database"), \
                 patch.object(self.verifier, "query", return_value=[(0, 0)]) as query:
             with self.assertRaisesRegex(RuntimeError, "Probe prerequisites missing"):
-                self.verifier.restore_acceptance(service, Mock(), ADMIN.username, "unit-password")
+                self.verifier.restore_acceptance(service, Mock(), ADMIN.login_name, "unit-password")
         self.assertFalse(any("CREATE TABLE dbo." in call.args[1] for call in query.call_args_list))
         service.restore_database.assert_not_called()
 
@@ -572,7 +574,7 @@ class BackupVerifierTests(unittest.TestCase):
                 patch.object(self.verifier, "query", side_effect=[[(1, 1)], pyodbc.Error("08S01", "private diagnostic")]), \
                 patch.object(self.verifier, "cleanup_probe") as cleanup, patch("builtins.print") as output:
             with self.assertRaisesRegex(RuntimeError, "cleanup is uncertain"):
-                self.verifier.restore_acceptance(service, Mock(), ADMIN.username, "unit-password")
+                self.verifier.restore_acceptance(service, Mock(), ADMIN.login_name, "unit-password")
         cleanup.assert_not_called()
         service.restore_database.assert_not_called()
         self.assertTrue(any("ownership uncertain" in str(call.args) for call in output.call_args_list))
@@ -626,7 +628,7 @@ class BackupRepositoryTests(unittest.TestCase):
         self.master.header_pages.append((COLUMNS, [header_row(backup_set(9))]))
         sets = self.repository.read_backup_sets(SQL_FILE)
         self.assertEqual([item.position for item in sets], [1, 3, 9])
-        self.assertEqual(sets[0].user_name, ADMIN.username)
+        self.assertEqual(sets[0].user_name, ADMIN.login_name)
         self.assertEqual(sets[0].finished_at, STAMP)
         self.assertEqual(self.master.cursors[0].next_calls, 3)
         self.assertEqual(self.master.closed, 0)

@@ -26,7 +26,7 @@ from app.utils import session
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ADMIN = User("GV00000001", "Admin", None, "GV00000001", True)
+ADMIN = User("GV00000001", "Admin", None, "GV00000001", True, login_name="admin_sql_login")
 
 
 class Cursor:
@@ -91,6 +91,7 @@ class PasswordRepositoryTests(SessionTests):
         self.assertNotIn("dbo.TaiKhoan", sql)
         self.assertNotIn("LoginName", sql)
         self.assertNotIn(ADMIN.username, parameters)
+        self.assertNotIn(ADMIN.login_name, parameters)
         self.assertEqual((self.connection.closed, self.connection.statement.closed), (0, 1))
         self.assertEqual(master.closed, 0)
 
@@ -333,7 +334,7 @@ class PasswordSQLContractTests(unittest.TestCase):
 
     def test_caller_mapping_sid_and_system_principal_guards(self):
         for token in ("SUSER_SNAME()", "ORIGINAL_LOGIN()", "USER_NAME()", "@Login<>ORIGINAL_LOGIN()",
-                      "@Login<>@User", "dp.name=sp.name AND dp.sid=sp.sid", "sp.name=@Login",
+                      "dp.sid=sp.sid", "dp.name=@User", "sp.name=@Login",
                       "sp.type='S'", "sp.principal_id<>1", "sp.sid=SUSER_SID()", "dp.type='S'",
                       "dp.authentication_type=1", "dp.principal_id>4", "THROW 52101"):
             self.assertIn(token, self.procedure)
@@ -415,7 +416,14 @@ class PasswordBootstrapContractTests(unittest.TestCase):
         self.assertEqual(allowlist,
                          "(p.class=0ANDp.permission_name=N'CONNECT'ANDp.state='G')OR"
                          "(p.class=1ANDp.major_idIN(ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'),-1),"
-                         "ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1))ANDp.permission_name=N'EXECUTE'ANDp.state='G')")
+                         "ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_GiangVien_XemHoSo'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_GiangVien_XemPhanCong'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_GiangVien_XemSinhVienLop'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_Diem_GetLopChoNhapDiem'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_Diem_GetMonHocChoNhapDiem'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_Diem_LayDanhSachNhapDiem'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_Diem_LuuDiem'),-1))ANDp.permission_name=N'EXECUTE'ANDp.state='G')")
         for token in ("sys.schemas", "sys.objects", "u.name=N'QLDSV_GIANGVIEN'",
                       "IS_ROLEMEMBER(N'QLDSV_GIANGVIEN',u.name)=1", "p.state IN ('G','W') AND NOT"):
             self.assertIn(token, guard)
@@ -426,12 +434,28 @@ class PasswordBootstrapContractTests(unittest.TestCase):
                          "(p.class=0ANDp.permission_name=N'CONNECT')OR"
                          "(p.class=1ANDp.major_idIN(ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemDiem'),-1),"
                          "ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'),-1),"
-                         "ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1))ANDp.permission_name=N'EXECUTE'ANDp.state='G')")
-        self.assertIn("DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')", guard)
+                         "ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemHoSoVaLop'),-1),"
+                         "ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemMonHoc'),-1))ANDp.permission_name=N'EXECUTE'ANDp.state='G')")
+        self.assertIn("DATABASE_PRINCIPAL_ID(@StudentUser), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')", guard)
         self.assertIn("p.state IN ('G', 'W') AND NOT", guard)
 
     def test_no_schema_database_or_unscoped_execute_grant(self):
         self.assertNotRegex(self.sql, r"(?i)\bGRANT\s+EXECUTE\s+(?:TO\b|ON\s+(?:SCHEMA|DATABASE)\s*::)")
+
+    def test_legacy_bootstrap_username_falls_back_to_configured_login(self):
+        compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+        init = (ROOT / "docker/init-db.sh").read_text(encoding="utf-8")
+        self.assertIn('QLDSV_ADMIN_USERNAME: "${QLDSV_ADMIN_USERNAME:-}"', compose)
+        self.assertIn('QLDSV_STUDENT_USERNAME: "${QLDSV_STUDENT_USERNAME:-}"', compose)
+        for prefix, default in (("admin", "GV00000001"), ("student", "SV00000001")):
+            upper = prefix.upper()
+            self.assertIn(f'{prefix}_login="${{QLDSV_{upper}_LOGIN:-{default}}}"', init)
+            self.assertIn(f'{prefix}_username="${{QLDSV_{upper}_USERNAME:-${prefix}_login}}"', init)
+
+        security_verifier = (ROOT / "docker/verify-security.py").read_text(encoding="utf-8")
+        self.assertIn('ADMIN_USER = os.environ.get("QLDSV_ADMIN_USERNAME") or ADMIN', security_verifier)
+        self.assertIn('STUDENT_USER = os.environ.get("QLDSV_STUDENT_USERNAME") or STUDENT', security_verifier)
 
 
 class PasswordVerifierTests(unittest.TestCase):
@@ -471,7 +495,7 @@ class PasswordVerifierTests(unittest.TestCase):
                 return [(sid,)]
             return []
 
-        with patch.dict(os.environ, {"QLDSV_ADMIN_PASSWORD": "unit-only"}), \
+        with patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": ADMIN.login_name, "QLDSV_ADMIN_PASSWORD": "unit-only"}), \
                 patch.object(verifier, "AuthService") as auth, \
                 patch.object(verifier, "open_sql_connection", return_value=control), \
                 patch.object(verifier, "preflight"), patch.object(verifier, "query", side_effect=fake_query), \
@@ -484,6 +508,10 @@ class PasswordVerifierTests(unittest.TestCase):
         self.assertEqual(len(deletions), 1)
         self.assertIn("@ExpectedSid=?", deletions[0][0])
         self.assertEqual(deletions[0][1][1], sid)
+        creations = [(sql, params) for sql, params in calls if "EXEC dbo.sp_TaoTaiKhoan" in sql]
+        self.assertEqual(len(creations), 1)
+        self.assertIn("@DatabaseUser=?", creations[0][0])
+        self.assertNotEqual(creations[0][1][0], creations[0][1][1])
         control.close.assert_called_once()
 
     def test_three_role_verification_requires_fresh_old_rejection_and_new_success(self):
@@ -498,14 +526,14 @@ class PasswordVerifierTests(unittest.TestCase):
                     patch.object(session, "require_qldsv_connection", return_value=Mock()), \
                     patch.object(session, "clear_session") as logout, patch("builtins.print"):
                 auth.return_value.login.side_effect = [
-                    User("disposable", "Admin", None, "disposable", True), Mock(),
+                    User("GV00000003", "Admin", None, "GV00000003", True, login_name="disposable"), Mock(),
                     verifier.InvalidCredentialsError("expected fresh-old denial"), Mock(),
                 ]
                 change.return_value.SQL_ERRORS = ChangePasswordService.SQL_ERRORS
                 change.return_value.change_password.side_effect = [
                     ChangePasswordError(ChangePasswordService.SQL_ERRORS[52102]), None,
                 ]
-                verifier.verify_self_change(Mock(), "disposable", role, b"sid", "initial")
+                verifier.verify_self_change(Mock(), "disposable", "GV00000003", role, b"sid", "initial")
                 changes = change.return_value.change_password.call_args_list
                 self.assertEqual(len(changes), 2)
                 self.assertNotEqual(changes[0].args[0], "initial")
@@ -523,7 +551,7 @@ class PasswordVerifierTests(unittest.TestCase):
         verifier = self.verifier
         with patch.object(verifier, "query", side_effect=[[], [(1, 0)]]) as query:
             with self.assertRaisesRegex(RuntimeError, "preexisting principals are never reused"):
-                verifier.preflight(Mock(), [("SV00000002", "QLDSV_SINHVIEN")])
+                verifier.preflight(Mock(), [("disposable_sv", "SV00000002", "QLDSV_SINHVIEN")])
         self.assertFalse(any("EXEC dbo.sp_TaoTaiKhoan" in call.args[1] or "EXEC dbo.sp_XoaTaiKhoan" in call.args[1]
                              for call in query.call_args_list))
 
@@ -538,7 +566,7 @@ class PasswordVerifierTests(unittest.TestCase):
                 raise pyodbc.Error("42000", "private SID mismatch")
             return []
 
-        with patch.dict(os.environ, {"QLDSV_ADMIN_PASSWORD": "unit-only"}), \
+        with patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": ADMIN.login_name, "QLDSV_ADMIN_PASSWORD": "unit-only"}), \
                 patch.object(verifier, "AuthService") as auth, \
                 patch.object(verifier, "open_sql_connection"), patch.object(verifier, "preflight"), \
                 patch.object(verifier, "query", side_effect=fake_query) as query, \
@@ -556,7 +584,7 @@ class PasswordVerifierTests(unittest.TestCase):
 
     def test_uncertain_creation_has_visible_cleanup_failure_without_delete_by_name(self):
         verifier = self.verifier
-        with patch.dict(os.environ, {"QLDSV_ADMIN_PASSWORD": "unit-only"}), \
+        with patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": ADMIN.login_name, "QLDSV_ADMIN_PASSWORD": "unit-only"}), \
                 patch.object(verifier, "AuthService") as auth, \
                 patch.object(verifier, "open_sql_connection"), patch.object(verifier, "preflight"), \
                 patch.object(verifier, "query", return_value=[]) as query, patch("builtins.print") as output:

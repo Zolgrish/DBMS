@@ -32,12 +32,20 @@ BEGIN
     IF ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
-       OR ORIGINAL_LOGIN()<>SUSER_SNAME() OR USER_NAME()<>SUSER_SNAME()
+       OR ORIGINAL_LOGIN()<>SUSER_SNAME()
        OR NOT EXISTS (SELECT 1 FROM sys.database_principals
                       WHERE name=USER_NAME() AND type='S' AND authentication_type=1
                         AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE sid=SUSER_SID() AND type='S' AND authentication_type=1 AND principal_id>4)<>1
        OR (SELECT COUNT(*) FROM sys.database_role_members
            WHERE member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME()))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())
+             AND r.name=N'QLDSV_ADMIN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 53001, 'Only an unambiguous mapped Admin may manage lecturer entities.', 1;
     BEGIN TRY
         BEGIN TRANSACTION;
@@ -55,9 +63,8 @@ BEGIN
             THROW 53009, 'Admin login metadata permission is required for safe lecturer mutation.', 1;
         IF EXISTS (SELECT 1 FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV=@MAGV)
             THROW 53003, 'Lecturer MAGV already exists.', 1;
-        IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name=@MAGV)
-           OR EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@MAGV)
-            THROW 53006, 'SQL Login/User exists. Remove SQL access in Account Management first.', 1;
+        IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@MAGV)
+            THROW 53006, 'SQL Database User exists. Remove SQL access in Account Management first.', 1;
         INSERT dbo.Giangvien(MAGV,HO,TEN,PHAI) VALUES(@MAGV,@HO,@TEN,@PHAI);
         COMMIT TRANSACTION;
     END TRY
@@ -85,12 +92,20 @@ BEGIN
     IF ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
-       OR ORIGINAL_LOGIN()<>SUSER_SNAME() OR USER_NAME()<>SUSER_SNAME()
+       OR ORIGINAL_LOGIN()<>SUSER_SNAME()
        OR NOT EXISTS (SELECT 1 FROM sys.database_principals
                       WHERE name=USER_NAME() AND type='S' AND authentication_type=1
                         AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE sid=SUSER_SID() AND type='S' AND authentication_type=1 AND principal_id>4)<>1
        OR (SELECT COUNT(*) FROM sys.database_role_members
            WHERE member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME()))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())
+             AND r.name=N'QLDSV_ADMIN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 53001, 'Only an unambiguous mapped Admin may manage lecturer entities.', 1;
     BEGIN TRY
         BEGIN TRANSACTION;
@@ -129,12 +144,20 @@ BEGIN
     IF ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
-       OR ORIGINAL_LOGIN()<>SUSER_SNAME() OR USER_NAME()<>SUSER_SNAME()
+       OR ORIGINAL_LOGIN()<>SUSER_SNAME()
        OR NOT EXISTS (SELECT 1 FROM sys.database_principals
                       WHERE name=USER_NAME() AND type='S' AND authentication_type=1
                         AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE sid=SUSER_SID() AND type='S' AND authentication_type=1 AND principal_id>4)<>1
        OR (SELECT COUNT(*) FROM sys.database_role_members
            WHERE member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME()))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())
+             AND r.name=N'QLDSV_ADMIN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 53001, 'Only an unambiguous mapped Admin may manage lecturer entities.', 1;
     BEGIN TRY
         BEGIN TRANSACTION;
@@ -149,9 +172,8 @@ BEGIN
         -- Without server metadata visibility, absence cannot be established safely.
         IF ISNULL(HAS_PERMS_BY_NAME(NULL,NULL,N'ALTER ANY LOGIN'),0)<>1
             THROW 53009, 'Admin login metadata permission is required for safe lecturer mutation.', 1;
-        IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name=@MAGV)
-           OR EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@MAGV)
-            THROW 53006, 'SQL Login/User exists. Remove SQL access in Account Management first.', 1;
+        IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@MAGV)
+            THROW 53006, 'SQL Database User exists. Remove SQL access in Account Management first.', 1;
         IF EXISTS (SELECT 1 FROM dbo.PhanCong WITH (UPDLOCK,HOLDLOCK) WHERE MAGV=@MAGV)
             THROW 53007, 'Lecturer still has teaching assignments; remove assignments explicitly first.', 1;
         -- The existing non-cascading assignment FK remains the final protection.

@@ -74,18 +74,18 @@ class AccountTests(unittest.TestCase):
 
     def test_metadata_list_maps_business_roles_names_and_sql_disabled_status(self):
         connection = Connection([
-            ("GV00000002", "QLDSV_GIANGVIEN", None, "GV00000002", False, None, None, "Le", "Lan"),
-            ("GV00000001", "QLDSV_ADMIN", None, "GV00000001", True, None, None, " Tran ", " Binh "),
-            ("SV00000002", "QLDSV_SINHVIEN", "SV00000002", None, False, " Nguyen ", " An ", None, None),
+            ("lecturer-login", "GV00000002", "QLDSV_GIANGVIEN", None, "GV00000002", False, None, None, "Le", "Lan", b"lecturer-sid"),
+            ("GV00000001", "GV00000001", "QLDSV_ADMIN", None, "GV00000001", True, None, None, " Tran ", " Binh ", b"admin-sid"),
+            ("student-login", "SV00000002", "QLDSV_SINHVIEN", "SV00000002", None, False, " Nguyen ", " An ", None, None, b"student-sid"),
         ])
         session.set_authenticated(ADMIN, connection)
         with patch.object(database.pyodbc, "connect") as connect:
             accounts = AccountRepository().find_all_accounts()
             connect.assert_not_called()
         self.assertEqual(accounts, [
-            User("GV00000002", "GiangVien", None, "GV00000002", True, "Le Lan"),
-            User("GV00000001", "Admin", None, "GV00000001", False, "Tran Binh"),
-            User("SV00000002", "SinhVien", "SV00000002", None, True, "Nguyen An"),
+            User("GV00000002", "GiangVien", None, "GV00000002", True, "Le Lan", login_name="lecturer-login", principal_sid=b"lecturer-sid"),
+            User("GV00000001", "Admin", None, "GV00000001", False, "Tran Binh", principal_sid=b"admin-sid"),
+            User("SV00000002", "SinhVien", "SV00000002", None, True, "Nguyen An", login_name="student-login", principal_sid=b"student-sid"),
         ])
         sql = connection.statement.calls[0][0]
         for source in ("sys.server_principals", "sys.sql_logins", "sys.database_principals",
@@ -93,8 +93,11 @@ class AccountTests(unittest.TestCase):
             self.assertIn(source, sql)
         self.assertNotIn("dbo.TaiKhoan", sql)
         self.assertIn("sp.sid = dp.sid", sql)
-        self.assertIn("sp.name = dp.name", sql)
+        self.assertNotIn("sp.name = dp.name", sql)
         self.assertIn("authentication_type = 1", sql)
+        self.assertIn("r.type='R'", sql)
+        self.assertIn("r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo')", sql)
+        self.assertIn("WHERE memberships.member_principal_id = dp.principal_id) = 1", sql)
         self.assertIn("COUNT(*)", sql)
         self.assertEqual((connection.closed, connection.statement.closed), (0, 1))
 
@@ -107,7 +110,10 @@ class AccountTests(unittest.TestCase):
         for check in ("ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'), -1) <> 1",
                       "ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'), -1) <> 0",
                       "ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'), -1) <> 0",
-                      "ORIGINAL_LOGIN() <> SUSER_SNAME()", "USER_NAME() <> SUSER_SNAME()"):
+                      "ORIGINAL_LOGIN() <> SUSER_SNAME()", "actor.sid=SUSER_SID()",
+                      "member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())",
+                      "actor_role.name=N'QLDSV_ADMIN'", "actor_role.type='R'",
+                      "actor_role.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo')"):
             self.assertIn(check, guard)
         self.assertIn("SELECT", query)
 
@@ -124,11 +130,13 @@ class AccountTests(unittest.TestCase):
                 sid = b"created-by-procedure"
                 connection = Connection([(sid,)])
                 session.set_authenticated(ADMIN, connection)
-                self.assertIs(AccountRepository().create_account("target", password, role), sid)
+                self.assertIs(AccountRepository().create_account("custom-login", password, role, "GV00000002"), sid)
                 self.assertEqual(len(connection.statement.calls), 1)
                 sql, params = connection.statement.calls[0]
-                self.assertEqual(params, ("target", role, password))
+                self.assertEqual(params, ("custom-login", "GV00000002", role,
+                                          None if role == "QLDSV_SINHVIEN" else password))
                 self.assertIn("EXEC dbo.sp_TaoTaiKhoan", sql)
+                self.assertIn("@LoginName=?, @DatabaseUser=?, @Role=?, @Password=?", sql)
                 self.assertRegex(sql, r"@CreatedSid\s*=\s*@CreatedSid\s+OUTPUT")
                 self.assertRegex(sql, r"SELECT\s+@CreatedSid\s*;")
                 self.assertNotIn("sys.server_principals", sql)
@@ -150,6 +158,15 @@ class AccountTests(unittest.TestCase):
         AccountRepository().delete_account("target")
         self.assertEqual(connection.statement.calls[0][1], ("target", None))
 
+    def test_repository_status_change_uses_parameterized_security_procedure(self):
+        connection = Connection()
+        session.set_authenticated(ADMIN, connection)
+        AccountRepository().set_account_disabled("target-login", True, b"expected")
+        self.assertEqual(connection.statement.calls[0], (
+            "EXEC dbo.sp_KhoaMoTaiKhoan @LoginName=?, @Disable=?, @ExpectedSid=?;",
+            ("target-login", True, b"expected"),
+        ))
+
     def test_staff_create_derives_magv_and_accepts_default_or_custom_password(self):
         self.repository.create_account.return_value = b"staff-owned"
         for role in ("Admin", "GiangVien"):
@@ -159,11 +176,14 @@ class AccountTests(unittest.TestCase):
                     result = self.service.create_account(role, password, magv=" gv00000002 ")
                     self.assertEqual(result, b"staff-owned")
                     self.repository.create_account.assert_called_once_with(
-                        "GV00000002", password or None, "QLDSV_" + ("ADMIN" if role == "Admin" else "GIANGVIEN"))
+                        "GV00000002", password or None, "QLDSV_" + ("ADMIN" if role == "Admin" else "GIANGVIEN"), "GV00000002")
                     self.repository.lecturer_exists.assert_not_called()
         self.repository.reset_mock()
         self.service.create_lecturer_account("gv00000002")
-        self.repository.create_account.assert_called_once_with("GV00000002", None, "QLDSV_GIANGVIEN")
+        self.repository.create_account.assert_called_once_with("GV00000002", None, "QLDSV_GIANGVIEN", "GV00000002")
+        self.repository.reset_mock()
+        self.service.create_account("Admin", "unit-password", magv="GV00000002", login_name="staff-login")
+        self.repository.create_account.assert_called_once_with("staff-login", "unit-password", "QLDSV_ADMIN", "GV00000002")
         with self.assertRaises(TypeError):
             self.service.create_account(username="unrelated", role="Admin", magv="GV00000002")
 
@@ -171,10 +191,13 @@ class AccountTests(unittest.TestCase):
         self.repository.create_account.return_value = b"student-owned"
         self.assertEqual(self.service.create_account("SinhVien", masv="sv00000002"),
                          b"student-owned")
-        self.repository.create_account.assert_called_once_with("SV00000002", None, "QLDSV_SINHVIEN")
+        self.repository.create_account.assert_called_once_with("SV00000002", None, "QLDSV_SINHVIEN", "SV00000002")
         self.repository.reset_mock()
         self.assertEqual(self.service.create_student_account(" sv00000002 "), b"student-owned")
-        self.repository.create_account.assert_called_once_with("SV00000002", None, "QLDSV_SINHVIEN")
+        self.repository.create_account.assert_called_once_with("SV00000002", None, "QLDSV_SINHVIEN", "SV00000002")
+        self.repository.reset_mock()
+        self.service.create_account("SinhVien", masv="SV00000002", login_name="student-login")
+        self.repository.create_account.assert_called_once_with("student-login", None, "QLDSV_SINHVIEN", "SV00000002")
         self.repository.student_exists.assert_not_called()
         self.assertNotIn("exists_username", AccountRepository.__dict__)
 
@@ -219,6 +242,14 @@ class AccountTests(unittest.TestCase):
             self.service.delete_account("ADMIN")
         self.repository.delete_account.assert_not_called()
 
+    def test_status_change_calls_repository_and_rejects_self(self):
+        self.service.set_account_active("target", False, b"expected")
+        self.repository.set_account_disabled.assert_called_once_with("target", True, b"expected")
+        self.repository.reset_mock()
+        with self.assertRaisesRegex(AccountServiceError, "đang đăng nhập"):
+            self.service.set_account_active("ADMIN", False)
+        self.repository.set_account_disabled.assert_not_called()
+
     def test_delete_sql_errors_include_active_session_and_missing_target(self):
         for number, text in {52010: "tồn tại", 52011: "mapping", 52012: "role", 52013: "sở hữu",
                              52014: "đang đăng nhập", 52015: "đăng xuất", 52016: "thay đổi"}.items():
@@ -227,6 +258,16 @@ class AccountTests(unittest.TestCase):
                 with self.assertRaisesRegex(AccountServiceError, text) as caught:
                     self.service.delete_account("target")
                 self.assertNotIn("private", str(caught.exception))
+
+    def test_status_sql_errors_are_safe_and_specific(self):
+        for number, text in {52010: "tồn tại", 52011: "mapping", 52012: "role",
+                             52016: "thay đổi", 52018: "đang đăng nhập", 52019: "trạng thái"}.items():
+            with self.subTest(number=number):
+                self.repository.set_account_disabled.side_effect = pyodbc.Error("42000", f"private ({number})")
+                with self.assertRaisesRegex(AccountServiceError, text) as caught:
+                    self.service.set_account_active("target", False, b"expected")
+                self.assertNotIn("private", str(caught.exception))
+                self.repository.reset_mock()
 
     def test_unknown_sql_error_is_safe(self):
         self.repository.find_all_accounts.side_effect = pyodbc.Error("42000", "private SQL diagnostic")
@@ -246,12 +287,13 @@ class AccountTests(unittest.TestCase):
                 AccountService().find_all_accounts()
             connect.assert_not_called()
 
-    def test_guest_and_student_cannot_list_create_or_delete(self):
+    def test_guest_student_and_lecturer_cannot_manage_accounts(self):
         for user in (None, User("SV00000002", "SinhVien", "SV00000002", None, True),
                      User("GV00000002", "GiangVien", None, "GV00000002", True)):
             session.set_authenticated(user, None) if user else session.clear_session()
             for method, args in (("find_all_accounts", ()), ("create_account", ("Admin", "pw", "", "GV00000002")),
-                                 ("create_student_account", ("SV00000002",)), ("delete_account", ("target",))):
+                                 ("create_student_account", ("SV00000002",)), ("delete_account", ("target",)),
+                                 ("set_account_active", ("target", False))):
                 with self.subTest(user=user, method=method):
                     with self.assertRaises(PermissionError):
                         getattr(self.service, method)(*args)
@@ -260,6 +302,7 @@ class AccountTests(unittest.TestCase):
     def test_connection_loss_invalidates_every_account_operation_without_reconnect(self):
         for method, args in (("find_all_accounts", ()), ("create_account", ("Admin", "pw", "", "GV00000002")),
                              ("create_student_account", ("SV00000002",)), ("delete_account", ("target",)),
+                             ("set_account_active", ("target", False)),
                              ("create_account", ("GiangVien", "pw", "", "GV00000001"))):
             with self.subTest(method=method, username=args[0] if args else ""):
                 qldsv, master = Connection(error=pyodbc.Error("08S01", "lost")), Connection()
@@ -276,6 +319,7 @@ class AccountTests(unittest.TestCase):
             ("find_all_accounts", (), "find_all_accounts"),
             ("create_account", ("Admin", "pw", "", "GV00000002"), "create_account"),
             ("delete_account", ("target",), "delete_account"),
+            ("set_account_active", ("target", False), "set_account_disabled"),
             ("create_account", ("GiangVien", "pw", "", "GV00000001"), "create_account"),
         ):
             with self.subTest(method=method):
@@ -285,7 +329,7 @@ class AccountTests(unittest.TestCase):
                     getattr(self.service, method)(*args)
                 self.assertIs(caught.exception, error)
 
-    def test_form_has_three_roles_no_username_and_only_applicable_identity(self):
+    def test_form_has_three_roles_distinct_login_and_only_applicable_identity(self):
         values = []
         form = AccountFormDialog("Thêm tài khoản", values.append)
         self.addCleanup(form.close)
@@ -293,7 +337,8 @@ class AccountTests(unittest.TestCase):
                          ["Admin", "GiangVien", "SinhVien"])
         self.assertIsNone(form.findChild(QLineEdit, "accountUsernameInput"))
         self.assertFalse(hasattr(form, "username_input"))
-        self.assertNotIn("Username", [x.text() for x in form.findChildren(QLabel)])
+        self.assertIsInstance(form.login_name_input, QLineEdit)
+        self.assertEqual(form.login_name_input.objectName(), "accountLoginNameInput")
         for role in ("Admin", "GiangVien", "SinhVien"):
             form.role_combo.setCurrentText(role)
             student = role == "SinhVien"
@@ -302,10 +347,12 @@ class AccountTests(unittest.TestCase):
             self.assertEqual(form.magv_input.isEnabled(), not student)
             self.assertEqual(form.magv_input.isHidden(), student)
         form.password_input.setText("programmatic-override")
+        form.login_name_input.setText("student-login")
         form.masv_input.setText("sv00000002")
         self.assertEqual(form.masv_input.text(), "SV00000002")
         form._save()
-        self.assertEqual(values[0], dict(role="SinhVien", masv="SV00000002", magv="", password=None))
+        self.assertEqual(values[0], dict(role="SinhVien", masv="SV00000002", magv="",
+                                         login_name="student-login", password=None))
         self.assertEqual(form.password_input.text(), "")
 
     def test_staff_form_submits_magv_and_clears_password_before_callback(self):
@@ -320,12 +367,14 @@ class AccountTests(unittest.TestCase):
                     self.addCleanup(form.close)
                     form.role_combo.setCurrentText(role)
                     form.magv_input.setText("gv00000002")
+                    form.login_name_input.setText("staff-login")
                     self.assertEqual(form.magv_input.text(), "GV00000002")
                     form.password_input.setText(password)
                     form._save()
-                    self.assertEqual(values[0], dict(role=role, masv="", magv="GV00000002", password=password or None))
+                    self.assertEqual(values[0], dict(role=role, masv="", magv="GV00000002",
+                                                     login_name="staff-login", password=password or None))
                     self.repository.create_account.assert_called_with(
-                        "GV00000002", password or None, AccountService.SQL_ROLES[role])
+                        "staff-login", password or None, AccountService.SQL_ROLES[role], "GV00000002")
 
     def _dialog(self):
         self.repository.find_all_accounts.return_value = [User("other", "Admin", None, None, True)]
@@ -334,12 +383,41 @@ class AccountTests(unittest.TestCase):
         dialog.account_table.selectRow(0)
         return dialog
 
-    def test_list_ui_has_add_delete_close_without_edit_or_lock(self):
+    def test_list_ui_has_add_delete_lock_unlock_and_close(self):
         dialog = self._dialog()
         labels = [button.text() for button in dialog.findChildren(QPushButton)]
-        self.assertEqual(labels, ["Thêm tài khoản", "Xóa tài khoản", "Đóng"])
+        self.assertEqual(labels, ["Thêm tài khoản", "Xóa tài khoản", "Khóa tài khoản", "Đóng"])
         self.assertEqual(dialog.ROLE_LABELS["GiangVien"], "Giảng viên")
-        self.assertEqual(dialog.HEADERS, ("Mã", "Họ và tên", "Vai trò", "Trạng thái"))
+        self.assertEqual(dialog.HEADERS, ("Username / Mã", "Login name", "Họ và tên", "Vai trò", "Trạng thái"))
+
+    def test_status_button_toggles_selected_login_and_reloads(self):
+        self.repository.find_all_accounts.return_value = [
+            User("GV00000002", "GiangVien", None, "GV00000002", True, "Le Lan", login_name="staff-login", principal_sid=b"staff-sid")
+        ]
+        dialog = AccountManagementDialog(self.service)
+        self.addCleanup(dialog.close)
+        dialog.account_table.selectRow(0)
+        self.assertEqual(dialog.status_button.text(), "Khóa tài khoản")
+        self.repository.find_all_accounts.return_value = [
+            User("GV00000002", "GiangVien", None, "GV00000002", False, "Le Lan", login_name="staff-login", principal_sid=b"staff-sid")
+        ]
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            dialog.status_button.click()
+        self.repository.set_account_disabled.assert_called_once_with("staff-login", True, b"staff-sid")
+        self.assertEqual(dialog.status_button.text(), "Mở khóa tài khoản")
+
+    def test_table_shows_distinct_login_and_business_identity_and_deletes_login(self):
+        self.repository.find_all_accounts.return_value = [
+            User("GV00000002", "GiangVien", None, "GV00000002", True, "Le Lan", login_name="staff-login")
+        ]
+        dialog = AccountManagementDialog(self.service)
+        self.addCleanup(dialog.close)
+        self.assertEqual(dialog.account_table.item(0, 0).text(), "GV00000002")
+        self.assertEqual(dialog.account_table.item(0, 1).text(), "staff-login")
+        dialog.account_table.selectRow(0)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            dialog.delete_button.click()
+        self.repository.delete_account.assert_called_once_with("staff-login")
 
     def test_delete_confirmation_cancel_does_not_call_service(self):
         dialog = self._dialog()
@@ -383,13 +461,31 @@ class VerifierSafetyTests(unittest.TestCase):
         connection_guard.start()
         self.addCleanup(connection_guard.stop)
 
+    @staticmethod
+    def _verifier_accounts():
+        return [
+            User("GV00000001", "Admin", None, "GV00000001", True, login_name="admin"),
+            User("SV00000001", "SinhVien", "SV00000001", None, True, login_name="SV00000001"),
+        ]
+
+    @staticmethod
+    def _verifier_env(**extra):
+        values = {
+            "QLDSV_ADMIN_LOGIN": "admin",
+            "QLDSV_ADMIN_USERNAME": "GV00000001",
+            "QLDSV_STUDENT_LOGIN": "SV00000001",
+            "QLDSV_STUDENT_USERNAME": "SV00000001",
+        }
+        values.update(extra)
+        return values
+
     def test_preexisting_principal_aborts_before_any_creation_or_cleanup(self):
         verifier = self.verifier
         control = Mock()
         service = Mock()
-        service.find_all_accounts.return_value = [ADMIN, User("SV00000001", "SinhVien", "SV00000001", None, True)]
+        service.find_all_accounts.return_value = self._verifier_accounts()
         with (
-            patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": "admin", "QLDSV_STUDENT_LOGIN": "SV00000001"}),
+            patch.dict(os.environ, self._verifier_env()),
             patch.object(verifier, "login_admin", return_value=control),
             patch.object(verifier, "AccountService", return_value=service),
             patch.object(verifier.AccountRepository, "student_exists", return_value=True),
@@ -410,7 +506,7 @@ class VerifierSafetyTests(unittest.TestCase):
         control = Mock()
         service = Mock()
         service.create_account.return_value = created_sid
-        service.find_all_accounts.return_value = [ADMIN, User("SV00000001", "SinhVien", "SV00000001", None, True)]
+        service.find_all_accounts.return_value = self._verifier_accounts()
         actual_expect_sql_error = verifier.expect_sql_error
 
         def query(connection, sql, *parameters):
@@ -438,7 +534,7 @@ class VerifierSafetyTests(unittest.TestCase):
                 actual_expect_sql_error(operation, number)
 
         with (
-            patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": "admin", "QLDSV_STUDENT_LOGIN": "SV00000001"}),
+            patch.dict(os.environ, self._verifier_env()),
             patch.object(verifier, "login_admin", return_value=control),
             patch.object(verifier, "AccountService", return_value=service),
             patch.object(verifier.AccountRepository, "student_exists", return_value=True),
@@ -452,7 +548,7 @@ class VerifierSafetyTests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError) as caught:
                 verifier.main()
-        name = service.create_account.call_args.kwargs["magv"]
+        name = service.create_account.call_args.kwargs["login_name"]
         deletions = [call for call in sql.call_args_list if "EXEC dbo.sp_XoaTaiKhoan" in call.args[1]]
         control.close.assert_called_once()
         return caught.exception, name, deletions, absent, sql.call_args_list
@@ -523,7 +619,7 @@ class VerifierSafetyTests(unittest.TestCase):
         control, active, repository, service = Mock(), Mock(), Mock(), Mock()
         service.create_account.return_value = b"admin-owned"
         service.create_student_account.return_value = b"student-owned"
-        service.find_all_accounts.return_value = [ADMIN, User("SV00000001", "SinhVien", "SV00000001", None, True)]
+        service.find_all_accounts.return_value = self._verifier_accounts()
         student = "SV00000002"
 
         def query(connection, sql, *parameters):
@@ -544,8 +640,8 @@ class VerifierSafetyTests(unittest.TestCase):
             return []
 
         with (
-            patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": "admin", "QLDSV_STUDENT_LOGIN": "SV00000001",
-                                    "QLDSV_VERIFY_STUDENT": student}),
+            patch.dict(os.environ, self._verifier_env(QLDSV_VERIFY_STUDENT=student,
+                                                      QLDSV_VERIFY_ADMIN_LOGIN="staff-login")),
             patch.object(verifier, "login_admin", return_value=control),
             patch.object(verifier, "AccountService", return_value=service),
             patch.object(verifier, "AccountRepository", return_value=repository),
@@ -560,7 +656,7 @@ class VerifierSafetyTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cleanup incomplete"):
                 verifier.main()
         service.create_student_account.assert_called_once_with(student)
-        name = service.create_account.call_args.kwargs["magv"]
+        name = service.create_account.call_args.kwargs["login_name"]
         repository.delete_account.assert_called_once_with(name, expected_sid=b"admin-owned")
         deletions = [call for call in sql.call_args_list if "EXEC dbo.sp_XoaTaiKhoan" in call.args[1]]
         self.assertEqual(len(deletions), 1)
@@ -571,8 +667,9 @@ class VerifierSafetyTests(unittest.TestCase):
         verifier = self.verifier
         control, active, repository, service = Mock(), Mock(), Mock(), Mock()
         student, lecturer, staff = "SV00000002", "GV00000002", "GV00000003"
+        lecturer_login, staff_login = "lecturer-login", "staff-login"
         role = "Admin"
-        sids = {staff: b"admin-owned", student: b"student-owned", lecturer: b"lecturer-owned"}
+        sids = {staff_login: b"admin-owned", student: b"student-owned", lecturer_login: b"lecturer-owned"}
 
         def require_admin():
             if role != "Admin":
@@ -580,11 +677,11 @@ class VerifierSafetyTests(unittest.TestCase):
 
         def list_accounts():
             require_admin()
-            return [ADMIN, User("SV00000001", "SinhVien", "SV00000001", None, True)]
+            return self._verifier_accounts()
 
-        def create_staff(requested_role, password=None, masv="", magv=""):
+        def create_staff(requested_role, password=None, masv="", magv="", login_name=None):
             require_admin()
-            return sids[magv]
+            return sids[login_name or magv]
 
         def create_student(name):
             require_admin()
@@ -593,43 +690,59 @@ class VerifierSafetyTests(unittest.TestCase):
         def login_user(name, *args):
             nonlocal role
             role = "SinhVien" if name == student else "GiangVien"
-            return User(name, role, name if role == "SinhVien" else None,
-                        name if role == "GiangVien" else None, True)
+            if role == "SinhVien":
+                return User(student, role, student, None, True, login_name=student)
+            return User(lecturer, role, None, lecturer, True, login_name=lecturer_login)
 
         def login_admin(*args, **kwargs):
             nonlocal role
             role = "Admin"
             return control if kwargs.get("cleanup_connection") else None
 
+        def delete_account(name):
+            require_admin()
+            if name == "admin":
+                raise AccountServiceError(AccountService.SQL_ERRORS[52014])
+            if name == staff_login:
+                raise AccountServiceError(AccountService.SQL_ERRORS[52015])
+
         service.find_all_accounts.side_effect = list_accounts
         service.create_account.side_effect = create_staff
         service.create_student_account.side_effect = create_student
-        service.delete_account.side_effect = lambda *args: require_admin()
+        service.delete_account.side_effect = delete_account
 
         def query(connection, sql, *parameters):
             if "OBJECT_ID" in sql:
                 return [(None,)]
-            name = parameters[0] if parameters else None
-            sql_role = {staff: "QLDSV_ADMIN", student: "QLDSV_SINHVIEN", lecturer: "QLDSV_GIANGVIEN"}.get(name)
             if "SELECT sp.sid" in sql:
-                return [(sids[name], False, name != student)]
+                login_name = parameters[1]
+                return [(sids[login_name], False, login_name != student)]
             if "sys.database_role_members" in sql:
+                database_user = parameters[0]
+                sql_role = {staff: "QLDSV_ADMIN", student: "QLDSV_SINHVIEN",
+                            lecturer: "QLDSV_GIANGVIEN"}.get(database_user)
                 return [(sql_role,)]
             if "sys.server_role_members" in sql:
-                return [("QLDSV_ACCOUNT_ADMIN",), ("dbcreator",)] if name == staff else []
+                login_name = parameters[0]
+                return [("QLDSV_ACCOUNT_ADMIN",), ("dbcreator",)] if login_name == staff_login else []
             if "SELECT 1" in sql:
                 return [(1,)]
             if "EXEC dbo.sp_XoaTaiKhoan" in sql:
+                login_name = parameters[0]
                 self.assertIn("@ExpectedSid=?", sql)
-                self.assertNotEqual(parameters[1], sids[name])
+                self.assertNotEqual(parameters[1], sids[login_name])
                 raise pyodbc.Error("42000", "identity changed (52016)")
             return []
 
         actual_expect_sql_error = verifier.expect_sql_error
         with (
-            patch.dict(os.environ, {"QLDSV_ADMIN_LOGIN": "admin", "QLDSV_STUDENT_LOGIN": "SV00000001",
-                                    "QLDSV_VERIFY_STUDENT": student, "QLDSV_VERIFY_ADMIN": staff,
-                                    "QLDSV_VERIFY_LECTURER": lecturer}),
+            patch.dict(os.environ, self._verifier_env(
+                QLDSV_VERIFY_STUDENT=student,
+                QLDSV_VERIFY_ADMIN=staff,
+                QLDSV_VERIFY_ADMIN_LOGIN=staff_login,
+                QLDSV_VERIFY_LECTURER=lecturer,
+                QLDSV_VERIFY_LECTURER_LOGIN=lecturer_login,
+            )),
             patch.object(verifier, "login_admin", side_effect=login_admin),
             patch.object(verifier.AuthService, "login", side_effect=login_user),
             patch.object(verifier, "AccountService", return_value=service),
@@ -643,10 +756,11 @@ class VerifierSafetyTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             verifier.main()
-        self.assertEqual([(call.args, call.kwargs) for call in repository.delete_account.call_args_list], [
-            ((staff,), {"expected_sid": b"admin-owned"}),
+        owned_deletes = [call for call in repository.delete_account.call_args_list if "expected_sid" in call.kwargs]
+        self.assertEqual([(call.args, call.kwargs) for call in owned_deletes], [
+            ((staff_login,), {"expected_sid": b"admin-owned"}),
             ((student,), {"expected_sid": b"student-owned"}),
-            ((lecturer,), {"expected_sid": b"lecturer-owned"}),
+            ((lecturer_login,), {"expected_sid": b"lecturer-owned"}),
         ])
 
 
@@ -658,18 +772,39 @@ class SqlOwnershipContractTests(unittest.TestCase):
         )
         cls.create = re.search(r"CREATE PROCEDURE dbo.sp_TaoTaiKhoan\b(.*?)\nGO", source, re.S).group(1)
         cls.delete = re.search(r"CREATE PROCEDURE dbo.sp_XoaTaiKhoan\b(.*?)\nGO", source, re.S).group(1)
+        cls.status = re.search(r"CREATE PROCEDURE dbo.sp_KhoaMoTaiKhoan\b(.*?)\nGO", source, re.S).group(1)
 
     def test_three_role_caller_and_target_membership_contracts(self):
-        for body in (self.create, self.delete):
+        for body in (self.create, self.delete, self.status):
             guard = body[:body.index("DECLARE @Name")]
             for role, expected in (("ADMIN", 1), ("GIANGVIEN", 0), ("SINHVIEN", 0)):
                 self.assertIn(f"ISNULL(IS_ROLEMEMBER(N'QLDSV_{role}'),-1)<>{expected}", guard)
+            for token in ("member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())",
+                          "r.name=N'QLDSV_ADMIN'", "r.type='R'",
+                          "r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo')"):
+                self.assertIn(token, guard)
         self.assertIn("(N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')", self.delete)
         self.assertIn("@BusinessRole<>N'QLDSV_ADMIN'", self.delete)
 
+    def test_status_change_preserves_sid_user_and_role_and_blocks_self(self):
+        body = self.status
+        header, body_only = re.split(r"\bAS\b", body, maxsplit=1)
+        self.assertRegex(header, r"@ExpectedSid\s+varbinary\(85\)\s*=\s*NULL")
+        self.assertIn("THROW 52018", body)
+        self.assertIn("ALTER LOGIN '+QUOTENAME(@Name)+CASE WHEN @Disable=1 THEN N' DISABLE;' ELSE N' ENABLE;' END", body)
+        self.assertIn("SUSER_SID(@Name)<>@Sid", body)
+        self.assertIn("@ExpectedSid IS NOT NULL AND @Sid<>@ExpectedSid", body_only)
+        self.assertIn("principal_id=@UserId AND name=@UserName AND sid=@Sid", body)
+        self.assertNotIn("DROP USER", body)
+        self.assertNotIn("ALTER ROLE ", body)
+        source = (Path(__file__).resolve().parents[1] / "database" / "StoredProcedures_Security.sql").read_text(encoding="utf-8")
+        self.assertIn("GRANT EXECUTE ON OBJECT::dbo.sp_KhoaMoTaiKhoan TO QLDSV_ADMIN;", source)
+        self.assertIn("DENY EXECUTE ON OBJECT::dbo.sp_KhoaMoTaiKhoan TO QLDSV_GIANGVIEN;", source)
+        self.assertIn("DENY EXECUTE ON OBJECT::dbo.sp_KhoaMoTaiKhoan TO QLDSV_SINHVIEN;", source)
+
     def test_staff_entity_lock_default_password_and_policy(self):
         body = self.create
-        locking = "FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV=@Name"
+        locking = "FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV=@UserName"
         self.assertIn(locking, body)
         self.assertLess(body.index("BEGIN TRANSACTION"), body.index(locking))
         self.assertLess(body.index(locking), body.index("CREATE LOGIN"))
@@ -677,6 +812,18 @@ class SqlOwnershipContractTests(unittest.TestCase):
         self.assertIn("SET @Password=N'Qldsv@123456'", body)
         self.assertIn("CASE WHEN @BusinessRole=N'QLDSV_SINHVIEN' THEN N'OFF;' ELSE N'ON;' END", body)
         self.assertIn("IF @BusinessRole=N'QLDSV_ADMIN'", body)
+
+    def test_distinct_sql_login_and_business_user_are_created_and_mapped_by_sid(self):
+        header, body = re.split(r"\bAS\b", self.create, maxsplit=1)
+        self.assertRegex(header, r"@LoginName\s+nvarchar\(max\)")
+        self.assertRegex(header, r"@DatabaseUser\s+nvarchar\(max\)\s*=\s*NULL")
+        self.assertIn("SET @UserName=@Name", body)  # Legacy same-name fallback.
+        self.assertIn("SET @UserName=CONVERT(sysname,@DatabaseUser)", body)
+        self.assertIn("CREATE LOGIN '+QUOTENAME(@Name)", body)
+        self.assertIn("CREATE USER '+QUOTENAME(@UserName)+N' FOR LOGIN '+QUOTENAME(@Name)", body)
+        self.assertIn("sid=SUSER_SID(@Name)", body)
+        self.assertIn("MAGV=@UserName", body)
+        self.assertIn("MASV=@UserName", body)
 
     def test_identity_and_own_score_reject_ambiguous_roles_and_validate_entity(self):
         source = (Path(__file__).resolve().parents[1] / "database" / "StoredProcedures_Security.sql").read_text(encoding="utf-8")
@@ -686,7 +833,27 @@ class SqlOwnershipContractTests(unittest.TestCase):
         self.assertIn("dbo.Sinhvien WHERE MASV=@User", identity)
         own = source.split("CREATE PROCEDURE dbo.sp_SinhVien_XemDiem", 1)[1].split("\nGO", 1)[0]
         self.assertIn("ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0", own)
+        for token in ("member_principal_id=DATABASE_PRINCIPAL_ID(@Student)",
+                      "r.name=N'QLDSV_SINHVIEN'", "r.type='R'",
+                      "r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo')"):
+            self.assertIn(token, own)
         self.assertNotRegex(source, r"GRANT EXECUTE ON SCHEMA")
+
+    def test_student_subjects_are_scoped_to_own_class_assignments(self):
+        source = (Path(__file__).resolve().parents[1] / "database" / "StoredProcedures_Roles.sql").read_text(encoding="utf-8")
+        subject = source.split("CREATE PROCEDURE dbo.sp_SinhVien_XemMonHoc", 1)[1].split("\nGO", 1)[0]
+        self.assertIn("dp.sid = SUSER_SID(@Caller)", subject)
+        self.assertIn("sv.MASV = @DatabaseUser", subject)
+        self.assertIn("FROM dbo.PhanCong pc", subject)
+        self.assertIn("JOIN dbo.Monhoc mh ON mh.MAMH = pc.MAMH", subject)
+        self.assertIn("WHERE pc.MALOP = @MALOP", subject)
+        self.assertNotRegex(subject, r"(?m)^\s*FROM\s+dbo\.Monhoc\s*$")
+        self.assertIn("GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemMonHoc TO QLDSV_SINHVIEN;", source)
+        self.assertNotIn("GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemMonHoc TO QLDSV_ADMIN", source)
+
+    def test_student_score_procedure_has_no_redundant_admin_grant(self):
+        source = (Path(__file__).resolve().parents[1] / "database" / "StoredProcedures_Security.sql").read_text(encoding="utf-8")
+        self.assertNotIn("GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemDiem TO QLDSV_ADMIN;", source)
 
     def test_identity_requires_one_direct_membership_matching_business_role(self):
         source = (Path(__file__).resolve().parents[1] / "database" / "StoredProcedures_Security.sql").read_text(encoding="utf-8")
@@ -704,6 +871,8 @@ class SqlOwnershipContractTests(unittest.TestCase):
         self.assertRegex(guard.group(1), r"JOIN\s+sys\.database_principals\s+r\s+ON\s+r\.principal_id\s*=\s*rm\.role_principal_id")
         self.assertRegex(guard.group(1), r"rm\.member_principal_id\s*=\s*DATABASE_PRINCIPAL_ID\s*\(\s*@User\s*\)")
         self.assertRegex(guard.group(1), r"r\.name\s*=\s*@BusinessRole\b")
+        self.assertRegex(guard.group(1), r"r\.type\s*=\s*'R'")
+        self.assertRegex(guard.group(1), r"r\.owning_principal_id\s*=\s*DATABASE_PRINCIPAL_ID\s*\(\s*N'dbo'\s*\)")
         self.assertLess(identity.index("@Admin+@Lecturer+@Student<>1"), guard.start())
         self.assertRegex(identity, r"@BusinessRole\s+AS\s+RoleName")
 
@@ -741,7 +910,9 @@ class SqlOwnershipContractTests(unittest.TestCase):
         self.assertLess(final_guard, body.index("DROP LOGIN"))
         self.assertIn("THROW 52016", body[final_guard:body.index("DROP LOGIN")])
         self.assertIn("sp_executesql", body[body.index("DROP LOGIN"):body.index("COMMIT TRANSACTION")])
-        self.assertRegex(body, r"@ExpectedSid\s*=\s*@ExpectedSid")
+        self.assertRegex(body, r"@Sid\s*=\s*@Sid")
+        self.assertIn("SELECT @UserId=principal_id,@UserName=name FROM sys.database_principals", body)
+        self.assertIn("sid=@Sid", body)
         catch = body.split("BEGIN CATCH", 1)[1]
         self.assertLess(catch.index("ROLLBACK TRANSACTION"), catch.index("IF @Error BETWEEN 52000 AND 52099 THROW"))
         self.assertLess(catch.index("IF @Error BETWEEN 52000 AND 52099 THROW"), catch.index("THROW 52015"))
