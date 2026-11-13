@@ -17,7 +17,9 @@ from PySide6.QtWidgets import (
 
 from app.models.diem import DiemSinhvienRow
 from app.services.diem_service import DiemService, DiemServiceError
+from app.ui.phancong_management import PhanCongManagementDialog
 from app.ui.styles import DIALOG_STYLE
+from app.utils import session
 
 
 class DiemManagementDialog(QDialog):
@@ -92,22 +94,35 @@ class DiemManagementDialog(QDialog):
         # Action Buttons
         buttons = QHBoxLayout()
         self.save_button = QPushButton("Ghi điểm")
+        self.delete_button = QPushButton("Xóa điểm")
         self.undo_button = QPushButton("Phục hồi")
+        self.phancong_button = QPushButton("Quản lý Phân công...")
         self.close_button = QPushButton("Thoát")
 
         self.save_button.setObjectName("saveDiemButton")
+        self.delete_button.setObjectName("deleteDiemButton")
         self.undo_button.setObjectName("undoDiemButton")
+        self.phancong_button.setObjectName("openPhanCongButton")
         self.close_button.setObjectName("closeDiemButton")
 
         self.save_button.clicked.connect(self._save_grades)
+        self.delete_button.clicked.connect(self._delete_selected_grade)
         self.undo_button.clicked.connect(self._reload_grid)
+        self.phancong_button.clicked.connect(self._open_phancong)
         self.close_button.clicked.connect(self.accept)
 
         self.save_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
         self.undo_button.setEnabled(False)
 
+        is_admin = bool(session.current_user and session.current_user.get("role") == "Admin")
+        self.delete_button.setVisible(is_admin)
+        self.phancong_button.setVisible(is_admin)
+
         buttons.addWidget(self.save_button)
+        buttons.addWidget(self.delete_button)
         buttons.addWidget(self.undo_button)
+        buttons.addWidget(self.phancong_button)
         buttons.addStretch()
         buttons.addWidget(self.close_button)
         layout.addLayout(buttons)
@@ -160,6 +175,7 @@ class DiemManagementDialog(QDialog):
         self._active_lan = None
         self.diem_table.setRowCount(0)
         self.save_button.setEnabled(False)
+        self.delete_button.setEnabled(False)
         self.undo_button.setEnabled(False)
 
     def _start_grading(self) -> None:
@@ -215,6 +231,7 @@ class DiemManagementDialog(QDialog):
 
         self.diem_table.resizeColumnsToContents()
         self.save_button.setEnabled(True)
+        self.delete_button.setEnabled(True)
         self.undo_button.setEnabled(True)
 
     def _save_grades(self) -> None:
@@ -239,4 +256,36 @@ class DiemManagementDialog(QDialog):
             f"Đã lưu điểm lần {self._active_lan} cho lớp {self._active_malop} - môn {self._active_mamh}.",
         )
         self._reload_grid()
+
+    def _delete_selected_grade(self) -> None:
+        if not self._active_mamh or self._active_lan not in (1, 2) or not self._rows:
+            return
+        row_idx = self.diem_table.currentRow()
+        if row_idx < 0 or row_idx >= len(self._rows):
+            QMessageBox.information(self, "Chọn sinh viên", "Hãy chọn một dòng sinh viên cần xóa điểm.")
+            return
+        sv = self._rows[row_idx]
+        answer = QMessageBox.question(
+            self,
+            "Xác nhận xóa điểm",
+            f"Xóa điểm lần {self._active_lan} môn {self._active_mamh} của sinh viên {sv.masv} — {sv.ho_ten}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self._service.delete_grade(sv.masv, self._active_mamh, self._active_lan)
+        except (DiemServiceError, PermissionError) as error:
+            QMessageBox.warning(self, "Không thể xóa điểm", str(error))
+            return
+        QMessageBox.information(self, "Thành công", f"Đã xóa điểm của sinh viên {sv.masv}.")
+        self._reload_grid()
+
+    def _open_phancong(self) -> None:
+        dialog = PhanCongManagementDialog(parent=self)
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
