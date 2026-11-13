@@ -24,8 +24,22 @@ from app.utils import session
 class FakeAccountRepository:
     def __init__(self) -> None:
         self.accounts = [
-            User("admin", "Admin", None, None, True),
-            User("SV00000003", "SinhVien", "SV00000003", None, True),
+            User(
+                "GV00000001",
+                "Admin",
+                None,
+                "GV00000001",
+                True,
+                login_name="admin-login",
+            ),
+            User(
+                "SV00000003",
+                "SinhVien",
+                "SV00000003",
+                None,
+                True,
+                login_name="student-login-03",
+            ),
         ]
         self.calls: list[tuple] = []
 
@@ -38,17 +52,40 @@ class FakeAccountRepository:
         return magv == "GV00000001"
 
     def create_account(
-        self, username: str, password: str | None, role: str
-    ) -> None:
-        self.calls.append(("create_account", username, password, role))
-        if any(account.username == username for account in self.accounts):
+        self,
+        login_name: str,
+        password: str | None,
+        role: str,
+        database_user: str,
+    ) -> bytes:
+        self.calls.append(
+            ("create_account", login_name, password, role, database_user)
+        )
+        if any(account.login_name == login_name for account in self.accounts):
             raise pyodbc.Error("42000", "Login exists (52004)")
-        student = role == "QLDSV_SINHVIEN"
-        self.accounts.append(User(username, "SinhVien" if student else "Admin", username if student else None, None, True))
+        ui_role = {
+            "QLDSV_ADMIN": "Admin",
+            "QLDSV_GIANGVIEN": "GiangVien",
+            "QLDSV_SINHVIEN": "SinhVien",
+        }[role]
+        student = ui_role == "SinhVien"
+        self.accounts.append(
+            User(
+                database_user,
+                ui_role,
+                database_user if student else None,
+                None if student else database_user,
+                True,
+                login_name=login_name,
+            )
+        )
+        return b"fake-sid"
 
-    def delete_account(self, username: str) -> None:
-        self.calls.append(("delete_account", username))
-        self.accounts = [account for account in self.accounts if account.username != username]
+    def delete_account(self, login_name: str) -> None:
+        self.calls.append(("delete_account", login_name))
+        self.accounts = [
+            account for account in self.accounts if account.login_name != login_name
+        ]
 
 
 class Epic14PermissionsTests(unittest.TestCase):
@@ -71,8 +108,25 @@ class Epic14PermissionsTests(unittest.TestCase):
             ("auto-create", lambda: self.service.create_student_account("SV00000004")),
             ("delete", lambda: self.service.delete_account("other")),
         )
-        for identity in (None, User("student", "SinhVien", "SV00000003", None, True),
-                         User("GV00000002", "GiangVien", None, "GV00000002", True)):
+        for identity in (
+            None,
+            User(
+                "SV00000003",
+                "SinhVien",
+                "SV00000003",
+                None,
+                True,
+                login_name="student-login-03",
+            ),
+            User(
+                "GV00000002",
+                "GiangVien",
+                None,
+                "GV00000002",
+                True,
+                login_name="lecturer-login-02",
+            ),
+        ):
             if identity is None:
                 session.clear_session()
             else:
@@ -84,20 +138,58 @@ class Epic14PermissionsTests(unittest.TestCase):
                     self.assertEqual(self.repository.calls, [])
 
     def test_admin_can_use_account_operations(self) -> None:
-        session.set_current_user(User("admin", "Admin", None, None, True))
+        session.set_current_user(
+            User(
+                "GV00000001",
+                "Admin",
+                None,
+                "GV00000001",
+                True,
+                login_name="admin-login",
+            )
+        )
         self.assertEqual(len(self.service.find_all_accounts()), 2)
-        self.service.create_account("Admin", "pw", magv="GV00000002")
+        self.service.create_account(
+            "Admin",
+            "pw",
+            magv="GV00000002",
+            login_name="admin-login-02",
+        )
         self.service.create_student_account("SV00000004")
-        self.service.delete_account("SV00000003")
+        self.service.delete_account("student-login-03")
 
         self.assertIn(
-            ("create_account", "SV00000004", None, "QLDSV_SINHVIEN"),
+            (
+                "create_account",
+                "SV00000004",
+                None,
+                "QLDSV_SINHVIEN",
+                "SV00000004",
+            ),
             self.repository.calls,
         )
+        self.assertIn(
+            (
+                "create_account",
+                "admin-login-02",
+                "pw",
+                "QLDSV_ADMIN",
+                "GV00000002",
+            ),
+            self.repository.calls,
+        )
+        self.assertIn(("delete_account", "student-login-03"), self.repository.calls)
         self.assertFalse(any(a.username == "SV00000003" for a in self.repository.accounts))
 
     def test_admin_menu_opens_account_list_and_refreshes_after_delete(self) -> None:
-        admin = User("admin", "Admin", None, None, True)
+        admin = User(
+            "GV00000001",
+            "Admin",
+            None,
+            "GV00000001",
+            True,
+            login_name="admin-login",
+        )
         session.set_current_user(admin)
         dashboard = AdminDashboard(admin, self.service)
         buttons = [button.text() for button in dashboard.findChildren(QPushButton)]
@@ -124,12 +216,14 @@ class Epic14PermissionsTests(unittest.TestCase):
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
             dialog.delete_button.click()
         self.assertEqual(dialog.account_table.rowCount(), 1)
-        self.assertEqual(dialog.account_table.item(0, 0).text(), "admin")
+        self.assertEqual(dialog.account_table.item(0, 0).text(), "GV00000001")
+        self.assertEqual(dialog.account_table.item(0, 1).text(), "admin-login")
         dialog.close()
         dashboard.close()
 
     def test_account_form_switches_identity_fields_with_role(self) -> None:
         dialog = AccountFormDialog("Thêm tài khoản", lambda values: None)
+        self.assertTrue(dialog.login_name_input.isEnabled())
         self.assertFalse(dialog.masv_input.isEnabled())
         self.assertTrue(dialog.magv_input.isEnabled())
 
@@ -139,14 +233,24 @@ class Epic14PermissionsTests(unittest.TestCase):
         dialog.masv_input.setText("SV00000003")
 
         self.assertFalse(hasattr(dialog, "username_input"))
+        self.assertTrue(hasattr(dialog, "login_name_input"))
         dialog.role_combo.setCurrentText("Admin")
         self.assertFalse(dialog.masv_input.isEnabled())
         self.assertEqual(dialog.masv_input.text(), "")
         self.assertTrue(dialog.magv_input.isEnabled())
         dialog.close()
 
-    def test_create_form_saves_account_and_reports_duplicate_username(self) -> None:
-        session.set_current_user(User("admin", "Admin", None, None, True))
+    def test_create_form_saves_account_and_reports_duplicate_login_name(self) -> None:
+        session.set_current_user(
+            User(
+                "GV00000001",
+                "Admin",
+                None,
+                "GV00000001",
+                True,
+                login_name="admin-login",
+            )
+        )
         list_dialog = AccountManagementDialog(self.service)
         form = AccountFormDialog(
             "Thêm tài khoản",
@@ -155,10 +259,20 @@ class Epic14PermissionsTests(unittest.TestCase):
         )
         form.role_combo.setCurrentText("SinhVien")
         form.masv_input.setText("SV00000004")
+        form.login_name_input.setText("student-login-04")
         form._save()
         self.assertEqual(form.result(), form.DialogCode.Accepted)
         list_dialog._load_accounts()
         self.assertEqual(list_dialog.account_table.rowCount(), 3)
+        created_row = next(
+            row
+            for row in range(list_dialog.account_table.rowCount())
+            if list_dialog.account_table.item(row, 0).text() == "SV00000004"
+        )
+        self.assertEqual(
+            list_dialog.account_table.item(created_row, 1).text(),
+            "student-login-04",
+        )
 
         duplicate = AccountFormDialog(
             "Thêm tài khoản",
@@ -166,8 +280,8 @@ class Epic14PermissionsTests(unittest.TestCase):
             parent=list_dialog,
         )
         duplicate.role_combo.setCurrentText("SinhVien")
-        duplicate.masv_input.setText("SV00000004")
-        duplicate.password_input.setText("123456")
+        duplicate.masv_input.setText("SV00000005")
+        duplicate.login_name_input.setText("student-login-04")
         with patch.object(QMessageBox, "warning") as warning:
             duplicate._save()
             self.assertIn("Tên đăng nhập đã tồn tại", warning.call_args.args[2])
@@ -177,7 +291,14 @@ class Epic14PermissionsTests(unittest.TestCase):
         list_dialog.close()
 
     def test_lecturer_menu_and_trusted_magv_exclude_admin_capabilities(self) -> None:
-        lecturer = User("GV00000002", "GiangVien", None, "GV00000002", True)
+        lecturer = User(
+            "GV00000002",
+            "GiangVien",
+            None,
+            "GV00000002",
+            True,
+            login_name="lecturer-login-02",
+        )
         session.set_current_user(lecturer)
         dashboard = LecturerDashboard(lecturer)
         self.addCleanup(dashboard.close)
@@ -188,11 +309,37 @@ class Epic14PermissionsTests(unittest.TestCase):
                           "Quản lý môn học", "Sao lưu / Phục hồi"):
             self.assertNotIn(forbidden, labels)
         self.assertEqual(require_lecturer_magv(), "GV00000002")
-        session.set_current_user(User("drift", "GiangVien", None, None, True))
+        session.set_current_user(
+            User(
+                "GV00000002",
+                "GiangVien",
+                None,
+                None,
+                True,
+                login_name="lecturer-login-02",
+            )
+        )
         with self.assertRaises(PermissionError):
             require_lecturer_magv()
-        for role in ("Admin", "SinhVien"):
-            session.set_current_user(User("x", role, None, "GV00000002", True))
+        for identity in (
+            User(
+                "GV00000001",
+                "Admin",
+                None,
+                "GV00000001",
+                True,
+                login_name="admin-login",
+            ),
+            User(
+                "SV00000003",
+                "SinhVien",
+                "SV00000003",
+                None,
+                True,
+                login_name="student-login-03",
+            ),
+        ):
+            session.set_current_user(identity)
             with self.assertRaises(PermissionError):
                 require_lecturer_magv()
         session.clear_session()
@@ -200,10 +347,26 @@ class Epic14PermissionsTests(unittest.TestCase):
             require_lecturer_magv()
 
     def test_student_menu_and_score_identity_use_session_masv(self) -> None:
-        session.set_current_user(User("student-login", "SinhVien", "SV00000003", None, True))
+        session.set_current_user(
+            User(
+                "SV00000003",
+                "SinhVien",
+                "SV00000003",
+                None,
+                True,
+                login_name="student-login",
+            )
+        )
         score_service = StudentScoreService()
         dashboard = StudentDashboard(
-            User("different-dashboard-user", "SinhVien", "SV99999999", None, True),
+            User(
+                "SV99999999",
+                "SinhVien",
+                "SV99999999",
+                None,
+                True,
+                login_name="different-dashboard-user",
+            ),
             score_service=score_service,
         )
         buttons = [button.text() for button in dashboard.findChildren(QPushButton)]

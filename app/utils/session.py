@@ -59,6 +59,7 @@ def set_authenticated(user: User, qldsv_connection, master_connection=None) -> N
     clear_session()
     current_user = {
         "username": user.username,
+        "login_name": user.login_name or user.username,
         "role": user.role,
         "masv": user.masv or "",
         "magv": user.magv or "",

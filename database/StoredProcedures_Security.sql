@@ -15,7 +15,10 @@ CREATE PROCEDURE dbo.sp_TaoTaiKhoan
     @LoginName nvarchar(max),
     @Role nvarchar(max),
     @Password nvarchar(max) = NULL,
-    @CreatedSid varbinary(85) = NULL OUTPUT
+    -- Keep the fourth positional parameter stable for legacy callers.
+    @CreatedSid varbinary(85) = NULL OUTPUT,
+    -- NULL preserves the legacy LoginName = DatabaseUser mapping.
+    @DatabaseUser nvarchar(max) = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -24,13 +27,26 @@ BEGIN
     IF ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
-       OR ORIGINAL_LOGIN()<>SUSER_SNAME() OR USER_NAME()<>SUSER_SNAME()
+       OR ORIGINAL_LOGIN()<>SUSER_SNAME()
+       OR NOT EXISTS (SELECT 1 FROM sys.database_principals
+                      WHERE name=USER_NAME() AND type='S' AND authentication_type=1
+                        AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE sid=SUSER_SID() AND type='S' AND authentication_type=1 AND principal_id>4)<>1
+       OR (SELECT COUNT(*) FROM sys.database_role_members
+           WHERE member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME()))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())
+             AND r.name=N'QLDSV_ADMIN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 52001, 'Only an unambiguous, mapped Admin connection may manage accounts.', 1;
     IF @LoginName IS NULL OR DATALENGTH(@LoginName) NOT BETWEEN 2 AND 256
        OR UNICODE(LEFT(@LoginName,1)) IN (9,10,11,12,13,32,160)
        OR UNICODE(RIGHT(@LoginName,1)) IN (9,10,11,12,13,32,160)
         THROW 52002, 'LoginName must contain 1..128 UTF-16 code units with no surrounding whitespace.', 1;
-    DECLARE @Name sysname=CONVERT(sysname,@LoginName), @BusinessRole sysname;
+    DECLARE @Name sysname=CONVERT(sysname,@LoginName), @UserName sysname, @BusinessRole sysname;
     IF @Name IN (N'sa',N'dbo',N'guest',N'public',N'sys',N'INFORMATION_SCHEMA',
                  N'QLDSV_ADMIN',N'QLDSV_SINHVIEN',N'QLDSV_GIANGVIEN',N'QLDSV_ACCOUNT_ADMIN')
        OR @Name LIKE N'##%' OR @Name LIKE N'db[_]%' OR @Name LIKE N'NT %'
@@ -38,6 +54,14 @@ BEGIN
     IF @Role IS NULL OR @Role COLLATE Latin1_General_100_BIN2 NOT IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
        OR DATALENGTH(@Role)<>DATALENGTH(RTRIM(@Role))
         THROW 52003, 'Role must be exactly QLDSV_ADMIN, QLDSV_GIANGVIEN or QLDSV_SINHVIEN.', 1;
+    IF @DatabaseUser IS NULL
+        SET @UserName=@Name;
+    ELSE
+        SET @UserName=CONVERT(sysname,@DatabaseUser);
+    IF DATALENGTH(@UserName)<>20
+       OR UNICODE(LEFT(@UserName,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
+       OR UNICODE(RIGHT(@UserName,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
+        THROW 52002, 'DatabaseUser must contain exactly 10 UTF-16 code units without surrounding whitespace.', 1;
     SET @BusinessRole=CONVERT(sysname,@Role);
     IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@BusinessRole AND type='R')
         THROW 52008, 'Expected business role missing; run Security.sql first.', 1;
@@ -62,19 +86,19 @@ BEGIN
         -- including when the caller holds an enclosing transaction open.
         IF @BusinessRole=N'QLDSV_SINHVIEN'
         BEGIN
-            IF DATALENGTH(@Name)<>20 OR NOT EXISTS (
-                SELECT 1 FROM dbo.Sinhvien WITH (UPDLOCK,HOLDLOCK) WHERE MASV=@Name)
-                THROW 52007, 'Student LoginName must be an existing 10-character Sinhvien.MASV.', 1;
+            IF DATALENGTH(@UserName)<>20 OR NOT EXISTS (
+                SELECT 1 FROM dbo.Sinhvien WITH (UPDLOCK,HOLDLOCK) WHERE MASV=@UserName)
+                THROW 52007, 'Student DatabaseUser must be an existing 10-character Sinhvien.MASV.', 1;
         END
         ELSE
         BEGIN
-            IF DATALENGTH(@Name)<>20 OR NOT EXISTS (
-                SELECT 1 FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV=@Name)
-                THROW 52017, 'Staff LoginName must be an existing 10-character Giangvien.MAGV.', 1;
+            IF DATALENGTH(@UserName)<>20 OR NOT EXISTS (
+                SELECT 1 FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV=@UserName)
+                THROW 52017, 'Staff DatabaseUser must be an existing 10-character Giangvien.MAGV.', 1;
         END;
         IF EXISTS (SELECT 1 FROM sys.server_principals WHERE name=@Name)
             THROW 52004, 'Server principal already exists; existing accounts are never repurposed.', 1;
-        IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@Name)
+        IF EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@UserName)
             THROW 52005, 'Database principal already exists; no automatic SID remapping is allowed.', 1;
         SET @sql=N'CREATE LOGIN '+QUOTENAME(@Name)+N' WITH PASSWORD=N'''
             +REPLACE(@Password,N'''',N'''''')+N''', DEFAULT_DATABASE=[QLDSV], CHECK_EXPIRATION=OFF, CHECK_POLICY='
@@ -84,8 +108,8 @@ BEGIN
         SET @Password=NULL;
         IF EXISTS (SELECT 1 FROM sys.database_principals WHERE sid=SUSER_SID(@Name))
             THROW 52005, 'Login SID collides with an existing database principal.', 1;
-        SET @sql=N'CREATE USER '+QUOTENAME(@Name)+N' FOR LOGIN '+QUOTENAME(@Name)+N' WITH DEFAULT_SCHEMA=dbo;'
-            +N'ALTER ROLE '+QUOTENAME(@BusinessRole)+N' ADD MEMBER '+QUOTENAME(@Name)+N';';
+        SET @sql=N'CREATE USER '+QUOTENAME(@UserName)+N' FOR LOGIN '+QUOTENAME(@Name)+N' WITH DEFAULT_SCHEMA=dbo;'
+            +N'ALTER ROLE '+QUOTENAME(@BusinessRole)+N' ADD MEMBER '+QUOTENAME(@UserName)+N';';
         EXEC (@sql);
         IF @BusinessRole=N'QLDSV_ADMIN'
         BEGIN
@@ -124,19 +148,32 @@ BEGIN
     IF ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
-       OR ORIGINAL_LOGIN()<>SUSER_SNAME() OR USER_NAME()<>SUSER_SNAME()
+       OR ORIGINAL_LOGIN()<>SUSER_SNAME()
+       OR NOT EXISTS (SELECT 1 FROM sys.database_principals
+                      WHERE name=USER_NAME() AND type='S' AND authentication_type=1
+                        AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE sid=SUSER_SID() AND type='S' AND authentication_type=1 AND principal_id>4)<>1
+       OR (SELECT COUNT(*) FROM sys.database_role_members
+           WHERE member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME()))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())
+             AND r.name=N'QLDSV_ADMIN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 52001, 'Only an unambiguous, mapped Admin connection may manage accounts.', 1;
     IF @LoginName IS NULL OR DATALENGTH(@LoginName) NOT BETWEEN 2 AND 256
        OR UNICODE(LEFT(@LoginName,1)) IN (9,10,11,12,13,32,160)
        OR UNICODE(RIGHT(@LoginName,1)) IN (9,10,11,12,13,32,160)
         THROW 52002, 'LoginName must contain 1..128 UTF-16 code units with no surrounding whitespace.', 1;
-    DECLARE @Name sysname=CONVERT(sysname,@LoginName), @Sid varbinary(85), @UserId int,
+    DECLARE @Name sysname=CONVERT(sysname,@LoginName), @UserName sysname, @Sid varbinary(85), @UserId int,
             @LoginId int, @BusinessRole sysname, @sql nvarchar(max), @Error int;
     IF @Name IN (N'sa',N'dbo',N'guest',N'public',N'sys',N'INFORMATION_SCHEMA',
                  N'QLDSV_ADMIN',N'QLDSV_SINHVIEN',N'QLDSV_GIANGVIEN',N'QLDSV_ACCOUNT_ADMIN')
        OR @Name LIKE N'##%' OR @Name LIKE N'db[_]%' OR @Name LIKE N'NT %'
         THROW 52002, 'Reserved/system principal names cannot be deleted.', 1;
-    IF @Name=ORIGINAL_LOGIN() OR @Name=SUSER_SNAME() OR @Name=USER_NAME()
+    IF @Name=ORIGINAL_LOGIN() OR @Name=SUSER_SNAME()
         THROW 52014, 'Self-delete is forbidden; use a different Admin connection.', 1;
     BEGIN TRY
         BEGIN TRANSACTION;
@@ -144,12 +181,15 @@ BEGIN
         WHERE name=@Name AND type='S' AND principal_id<>1;
         IF @Sid IS NULL
             THROW 52010, 'Target must be an existing non-system SQL Login (enabled or disabled).', 1;
+        IF @Sid=SUSER_SID()
+            THROW 52014, 'Self-delete is forbidden; use a different Admin connection.', 1;
         IF @ExpectedSid IS NOT NULL AND @Sid<>@ExpectedSid
             THROW 52016, 'Target principal identity changed; deletion refused.', 1;
-        SELECT @UserId=principal_id FROM sys.database_principals
-        WHERE name=@Name AND type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4;
-        IF @UserId IS NULL
-            THROW 52011, 'Target must have a same-name mapped QLDSV User with matching SID.', 1;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4)<>1
+            THROW 52011, 'Target Login must map by SID to exactly one QLDSV Database User.', 1;
+        SELECT @UserId=principal_id,@UserName=name FROM sys.database_principals
+        WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4;
         IF (SELECT COUNT(*) FROM sys.database_role_members rm
             JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
             WHERE rm.member_principal_id=@UserId AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))<>1
@@ -159,6 +199,12 @@ BEGIN
             THROW 52012, 'Target must belong to exactly one business role and no unrelated database roles.', 1;
         SELECT @BusinessRole=r.name FROM sys.database_role_members rm
         JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id WHERE rm.member_principal_id=@UserId;
+        IF DATALENGTH(@UserName)<>20
+           OR (@BusinessRole IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN')
+               AND NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV=@UserName))
+           OR (@BusinessRole=N'QLDSV_SINHVIEN'
+               AND NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV=@UserName))
+            THROW 52011, 'Target Database User must identify an existing MAGV or MASV for its business role.', 1;
         IF EXISTS (SELECT 1 FROM sys.databases WHERE owner_sid=@Sid)
            OR EXISTS (SELECT 1 FROM sys.schemas WHERE principal_id=@UserId)
            OR EXISTS (SELECT 1 FROM sys.objects WHERE principal_id=@UserId)
@@ -179,14 +225,17 @@ BEGIN
                 +N'ALTER SERVER ROLE dbcreator DROP MEMBER '+QUOTENAME(@Name)+N';';
             EXEC (@sql);
         END;
-        SET @sql=N'ALTER ROLE '+QUOTENAME(@BusinessRole)+N' DROP MEMBER '+QUOTENAME(@Name)+N';'
-            +N'DROP USER '+QUOTENAME(@Name)+N';'
-            -- Check again in the DROP batch; a mismatch rolls back User/role changes too.
-            +N'IF @ExpectedSid IS NOT NULL AND (SUSER_SID(@Name) IS NULL OR SUSER_SID(@Name)<>@ExpectedSid) '
+        SET @sql=N'IF NOT EXISTS (SELECT 1 FROM sys.database_principals '
+            +N'WHERE name=@UserName AND type=''S'' AND authentication_type=1 AND sid=@Sid AND principal_id>4) '
+            +N'THROW 52016, ''Target principal identity changed; deletion refused.'', 1; '
+            +N'ALTER ROLE '+QUOTENAME(@BusinessRole)+N' DROP MEMBER '+QUOTENAME(@UserName)+N';'
+            +N'DROP USER '+QUOTENAME(@UserName)+N';'
+            -- Always recheck the captured Login SID; a mismatch rolls back User/role changes too.
+            +N'IF SUSER_SID(@Name) IS NULL OR SUSER_SID(@Name)<>@Sid '
             +N'THROW 52016, ''Target principal identity changed; deletion refused.'', 1; '
             +N'DROP LOGIN '+QUOTENAME(@Name)+N';';
-        EXEC sys.sp_executesql @sql, N'@Name sysname, @ExpectedSid varbinary(85)',
-            @Name=@Name, @ExpectedSid=@ExpectedSid;
+        EXEC sys.sp_executesql @sql, N'@Name sysname, @UserName sysname, @Sid varbinary(85)',
+            @Name=@Name, @UserName=@UserName, @Sid=@Sid;
         COMMIT TRANSACTION;
     END TRY
     BEGIN CATCH
@@ -197,6 +246,112 @@ BEGIN
         IF @Error=15434
             THROW 52015, 'Account deletion rolled back: target Login has an active session. Close its sessions and retry; no session was killed.', 1;
         THROW 52015, 'Account deletion rolled back. Check active sessions, ownership and delegated server permissions.', 1;
+    END CATCH;
+END;
+GO
+IF OBJECT_ID(N'dbo.sp_KhoaMoTaiKhoan', N'P') IS NOT NULL
+    DROP PROCEDURE dbo.sp_KhoaMoTaiKhoan;
+GO
+CREATE PROCEDURE dbo.sp_KhoaMoTaiKhoan
+    @LoginName nvarchar(max),
+    @Disable bit,
+    @ExpectedSid varbinary(85) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET XACT_ABORT ON;
+    IF ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
+       OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
+       OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
+       OR ORIGINAL_LOGIN()<>SUSER_SNAME()
+       OR NOT EXISTS (SELECT 1 FROM sys.database_principals
+                      WHERE name=USER_NAME() AND type='S' AND authentication_type=1
+                        AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE sid=SUSER_SID() AND type='S' AND authentication_type=1 AND principal_id>4)<>1
+       OR (SELECT COUNT(*) FROM sys.database_role_members
+           WHERE member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME()))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())
+             AND r.name=N'QLDSV_ADMIN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
+        THROW 52001, 'Only an unambiguous, mapped Admin connection may manage accounts.', 1;
+    IF @LoginName IS NULL OR DATALENGTH(@LoginName) NOT BETWEEN 2 AND 256
+       OR UNICODE(LEFT(@LoginName,1)) IN (9,10,11,12,13,32,160)
+       OR UNICODE(RIGHT(@LoginName,1)) IN (9,10,11,12,13,32,160)
+        THROW 52002, 'LoginName must contain 1..128 UTF-16 code units with no surrounding whitespace.', 1;
+    IF @Disable IS NULL
+        THROW 52019, 'Requested account status is invalid.', 1;
+
+    DECLARE @Name sysname=CONVERT(sysname,@LoginName), @UserName sysname, @Sid varbinary(85),
+            @UserId int, @LoginId int, @BusinessRole sysname, @sql nvarchar(max), @Error int;
+    IF @Name IN (N'sa',N'dbo',N'guest',N'public',N'sys',N'INFORMATION_SCHEMA',
+                 N'QLDSV_ADMIN',N'QLDSV_SINHVIEN',N'QLDSV_GIANGVIEN',N'QLDSV_ACCOUNT_ADMIN')
+       OR @Name LIKE N'##%' OR @Name LIKE N'db[_]%' OR @Name LIKE N'NT %'
+        THROW 52002, 'Reserved/system principal names cannot be enabled or disabled.', 1;
+    IF @Name=ORIGINAL_LOGIN() OR @Name=SUSER_SNAME()
+        THROW 52018, 'Changing the current Login status is forbidden; use another Admin connection.', 1;
+
+    BEGIN TRY
+        BEGIN TRANSACTION;
+        SELECT @Sid=sid,@LoginId=principal_id FROM sys.server_principals
+        WHERE name=@Name AND type='S' AND principal_id<>1;
+        IF @Sid IS NULL
+            THROW 52010, 'Target must be an existing non-system SQL Login.', 1;
+        IF @Sid=SUSER_SID()
+            THROW 52018, 'Changing the current Login status is forbidden; use another Admin connection.', 1;
+        IF @ExpectedSid IS NOT NULL AND @Sid<>@ExpectedSid
+            THROW 52016, 'Target principal identity changed; status update refused.', 1;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4)<>1
+            THROW 52011, 'Target Login must map by SID to exactly one QLDSV Database User.', 1;
+        SELECT @UserId=principal_id,@UserName=name FROM sys.database_principals
+        WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4;
+        IF (SELECT COUNT(*) FROM sys.database_role_members rm
+            JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+            WHERE rm.member_principal_id=@UserId AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))<>1
+           OR EXISTS (SELECT 1 FROM sys.database_role_members rm
+                      JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+                      WHERE rm.member_principal_id=@UserId AND r.name NOT IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))
+            THROW 52012, 'Target must belong to exactly one business role and no unrelated database roles.', 1;
+        SELECT @BusinessRole=r.name FROM sys.database_role_members rm
+        JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id WHERE rm.member_principal_id=@UserId;
+        IF DATALENGTH(@UserName)<>20
+           OR (@BusinessRole IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN')
+               AND NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV=@UserName))
+           OR (@BusinessRole=N'QLDSV_SINHVIEN'
+               AND NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV=@UserName))
+            THROW 52011, 'Target Database User must identify an existing MAGV or MASV for its business role.', 1;
+        IF EXISTS (SELECT 1 FROM sys.server_role_members rm
+                   JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
+                   WHERE rm.member_principal_id=@LoginId
+                     AND (@BusinessRole<>N'QLDSV_ADMIN' OR r.name NOT IN (N'QLDSV_ACCOUNT_ADMIN',N'dbcreator')))
+           OR (@BusinessRole=N'QLDSV_ADMIN' AND
+               (NOT EXISTS (SELECT 1 FROM sys.server_role_members WHERE member_principal_id=@LoginId AND role_principal_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN'))
+                OR NOT EXISTS (SELECT 1 FROM sys.server_role_members WHERE member_principal_id=@LoginId AND role_principal_id=SUSER_ID(N'dbcreator'))))
+            THROW 52012, 'Target server-role memberships do not match a managed application account.', 1;
+
+        SET @sql=N'IF SUSER_SID(@Name) IS NULL OR SUSER_SID(@Name)<>@Sid '
+            +N'THROW 52016, ''Target principal identity changed; status update refused.'', 1; '
+            +N'ALTER LOGIN '+QUOTENAME(@Name)+CASE WHEN @Disable=1 THEN N' DISABLE;' ELSE N' ENABLE;' END;
+        EXEC sys.sp_executesql @sql, N'@Name sysname, @Sid varbinary(85)', @Name=@Name, @Sid=@Sid;
+        IF SUSER_SID(@Name) IS NULL OR SUSER_SID(@Name)<>@Sid
+           OR NOT EXISTS (SELECT 1 FROM sys.database_principals
+                          WHERE principal_id=@UserId AND name=@UserName AND sid=@Sid
+                            AND type='S' AND authentication_type=1)
+            THROW 52016, 'Target principal identity changed; status update refused.', 1;
+        IF NOT EXISTS (SELECT 1 FROM sys.sql_logins WHERE principal_id=@LoginId AND is_disabled=@Disable)
+            THROW 52019, 'SQL Login status did not change to the requested value.', 1;
+        COMMIT TRANSACTION;
+    END TRY
+    BEGIN CATCH
+        SET @Error=ERROR_NUMBER();
+        IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
+        SET @sql=NULL;
+        IF @Error BETWEEN 52000 AND 52099 THROW;
+        THROW 52019, 'Account status update rolled back.', 1;
     END CATCH;
 END;
 GO
@@ -211,7 +366,11 @@ BEGIN
             @Admin int=ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1),
             @Lecturer int=ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1),
             @Student int=ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1);
-    IF @Login IS NULL OR @User IS NULL OR @Login<>ORIGINAL_LOGIN() OR @Login<>@User
+    IF @Login IS NULL OR @User IS NULL OR ORIGINAL_LOGIN() IS NULL OR @Login<>ORIGINAL_LOGIN()
+       OR NOT EXISTS (SELECT 1 FROM sys.server_principals
+                      WHERE name=@Login AND type='S' AND principal_id<>1 AND sid=SUSER_SID())
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE type='S' AND authentication_type=1 AND sid=SUSER_SID() AND principal_id>4)<>1
        OR NOT EXISTS (SELECT 1 FROM sys.database_principals
                       WHERE name=@User AND type='S' AND authentication_type=1 AND sid=SUSER_SID() AND principal_id>4)
         THROW 52020, 'Invalid real SQL Login/Database User mapping.', 1;
@@ -230,7 +389,8 @@ BEGIN
            SELECT 1 FROM sys.database_role_members rm
            JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
            WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(@User)
-             AND r.name=@BusinessRole)
+             AND r.name=@BusinessRole AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 52021, 'Identity must belong directly to exactly one database role, matching its business role.', 1;
     IF DATALENGTH(@User)<>20
        OR ((@Admin=1 OR @Lecturer=1) AND NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV=@User))
@@ -258,10 +418,12 @@ BEGIN
         -- Same runtime mapping/entity/direct-membership rules as login.
         -- Reject impersonation, contained/system users and stale SID mappings.
         IF @Login IS NULL OR @User IS NULL OR ORIGINAL_LOGIN() IS NULL
-           OR @Login<>ORIGINAL_LOGIN() OR @Login<>@User
+           OR @Login<>ORIGINAL_LOGIN()
+           OR (SELECT COUNT(*) FROM sys.database_principals
+               WHERE type='S' AND authentication_type=1 AND sid=SUSER_SID() AND principal_id>4)<>1
            OR NOT EXISTS (
                SELECT 1 FROM sys.server_principals sp
-               JOIN sys.database_principals dp ON dp.name=sp.name AND dp.sid=sp.sid
+               JOIN sys.database_principals dp ON dp.sid=sp.sid
                WHERE sp.name=@Login AND sp.type='S' AND sp.principal_id<>1
                  AND sp.sid=SUSER_SID() AND dp.name=@User AND dp.type='S'
                  AND dp.authentication_type=1 AND dp.principal_id>4)
@@ -323,12 +485,24 @@ CREATE PROCEDURE dbo.sp_SinhVien_XemDiem
 AS
 BEGIN
     SET NOCOUNT ON;
-    DECLARE @Student sysname=USER_NAME();
+    DECLARE @Student sysname=USER_NAME(), @Login sysname=SUSER_SNAME();
     IF ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>1 OR ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>0
        OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
-       OR @Student<>SUSER_SNAME() OR SUSER_SNAME()<>ORIGINAL_LOGIN()
+       OR @Login IS NULL OR ORIGINAL_LOGIN() IS NULL OR @Login<>ORIGINAL_LOGIN()
+       OR NOT EXISTS (SELECT 1 FROM sys.server_principals
+                      WHERE name=@Login AND type='S' AND principal_id<>1 AND sid=SUSER_SID())
+       OR (SELECT COUNT(*) FROM sys.database_principals
+           WHERE type='S' AND authentication_type=1 AND sid=SUSER_SID() AND principal_id>4)<>1
        OR NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@Student AND type='S'
                       AND authentication_type=1 AND sid=SUSER_SID() AND principal_id>4)
+       OR (SELECT COUNT(*) FROM sys.database_role_members
+           WHERE member_principal_id=DATABASE_PRINCIPAL_ID(@Student))<>1
+       OR NOT EXISTS (
+           SELECT 1 FROM sys.database_role_members rm
+           JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+           WHERE rm.member_principal_id=DATABASE_PRINCIPAL_ID(@Student)
+             AND r.name=N'QLDSV_SINHVIEN' AND r.type='R'
+             AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
         THROW 52022, 'Only an unambiguous, mapped Student connection may view its own exam attempts.', 1;
     IF DATALENGTH(@Student)<>20 OR NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WHERE MASV=@Student)
         THROW 52023, 'Database User does not identify a real Sinhvien.MASV.', 1;
@@ -343,14 +517,16 @@ END;
 GO
 GRANT EXECUTE ON OBJECT::dbo.sp_TaoTaiKhoan TO QLDSV_ADMIN;
 GRANT EXECUTE ON OBJECT::dbo.sp_XoaTaiKhoan TO QLDSV_ADMIN;
+GRANT EXECUTE ON OBJECT::dbo.sp_KhoaMoTaiKhoan TO QLDSV_ADMIN;
 GRANT EXECUTE ON OBJECT::dbo.sp_ThongTinDangNhap TO QLDSV_ADMIN;
-GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemDiem TO QLDSV_ADMIN;
 DENY EXECUTE ON OBJECT::dbo.sp_TaoTaiKhoan TO QLDSV_GIANGVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_XoaTaiKhoan TO QLDSV_GIANGVIEN;
+DENY EXECUTE ON OBJECT::dbo.sp_KhoaMoTaiKhoan TO QLDSV_GIANGVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_SinhVien_XemDiem TO QLDSV_GIANGVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_ThongTinDangNhap TO QLDSV_GIANGVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_TaoTaiKhoan TO QLDSV_SINHVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_XoaTaiKhoan TO QLDSV_SINHVIEN;
+DENY EXECUTE ON OBJECT::dbo.sp_KhoaMoTaiKhoan TO QLDSV_SINHVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_ThongTinDangNhap TO QLDSV_SINHVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemDiem TO QLDSV_SINHVIEN;
 GRANT EXECUTE ON OBJECT::dbo.sp_DoiMatKhau TO QLDSV_ADMIN;

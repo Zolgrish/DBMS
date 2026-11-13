@@ -60,19 +60,21 @@ def expect_business_error(operation, number):
         raise RuntimeError("Expected lecturer deletion rejection was not returned")
 
 
-def assert_absent(connection, magv):
+def assert_absent(connection, magv, login_name):
     row = query(connection, """
 SELECT (SELECT COUNT(*) FROM dbo.Giangvien WHERE MAGV=?),
        (SELECT COUNT(*) FROM sys.server_principals WHERE name=?),
        (SELECT COUNT(*) FROM sys.database_principals WHERE name=?),
        (SELECT COUNT(*) FROM dbo.PhanCong WHERE MAGV=?);
-""", magv, magv, magv, magv)[0]
+""", magv, login_name, magv, magv)[0]
     check(tuple(row) == (0, 0, 0, 0), "Disposable MAGV/principal state is not absent; existing state is never reused")
 
 
-def preflight(connection, magv):
+def preflight(connection, magv, login_name):
     query(connection, """
-IF ORIGINAL_LOGIN()<>SUSER_SNAME() OR USER_NAME()<>SUSER_SNAME()
+IF ORIGINAL_LOGIN()<>SUSER_SNAME()
+ OR NOT EXISTS(SELECT 1 FROM sys.database_principals dp JOIN sys.server_principals sp
+               ON dp.sid=sp.sid WHERE dp.name=USER_NAME() AND sp.name=SUSER_SNAME())
  OR ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN'),-1)<>1
  OR ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN'),-1)<>0
  OR ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN'),-1)<>0
@@ -99,7 +101,7 @@ IF OBJECT_ID(N'dbo.sp_GetGiangVien',N'P') IS NULL
                AND is_not_trusted=0 AND delete_referential_action=0)
     THROW 53100, 'Lecturer/security procedures and assignment FK must be deployed first.', 1;
 """)
-    assert_absent(connection, magv)
+    assert_absent(connection, magv, login_name)
     rows = query(connection, "SELECT TOP (1) l.MALOP,m.MAMH FROM dbo.Lop l CROSS JOIN dbo.Monhoc m ORDER BY l.MALOP,m.MAMH;")
     check(rows, "Existing class/course required for the disposable assignment")
     return tuple(rows[0])
@@ -113,6 +115,7 @@ def main():
             raise RuntimeError("BLOCKED: current Admin credential required")
         password = getpass.getpass("Current application Admin SQL password: ")
     magv = "L" + secrets.token_hex(5)[:9].upper()
+    login_name = "verify_" + magv
     control = lecturer_connection = None
     sid = None
     entity_owned = assignment_owned = False
@@ -122,10 +125,10 @@ def main():
     pair = None
     try:
         user = AuthService().login(admin, password)
-        check(user.role == "Admin" and user.magv == user.username, "Real mapped application Admin required")
+        check(user.role == "Admin" and user.login_name == admin and user.magv == user.username, "Real mapped application Admin required")
         control = open_sql_connection(admin, password)
         password = ""
-        pair = preflight(control, magv)  # No mutation before all prerequisites pass.
+        pair = preflight(control, magv, login_name)  # No mutation before all prerequisites pass.
         service = LecturerService()
         print("Disposable lecturer MAGV: " + magv, flush=True)
         mutation_started = True
@@ -138,15 +141,15 @@ def main():
         rows = query(control, """
 SET NOCOUNT ON;
 DECLARE @CreatedSid varbinary(85);
-EXEC dbo.sp_TaoTaiKhoan @LoginName=?,@Role=N'QLDSV_GIANGVIEN',@Password=?,@CreatedSid=@CreatedSid OUTPUT;
+EXEC dbo.sp_TaoTaiKhoan @LoginName=?,@DatabaseUser=?,@Role=N'QLDSV_GIANGVIEN',@Password=?,@CreatedSid=@CreatedSid OUTPUT;
 SELECT @CreatedSid;
-""", magv, staff_password)
+""", login_name, magv, staff_password)
         check(len(rows) == 1 and isinstance(rows[0][0], bytes) and bool(rows[0][0]), "Missing account ownership SID")
         sid, account_uncertain = rows[0][0], False
-        lecturer_connection = open_sql_connection(magv, staff_password)
+        lecturer_connection = open_sql_connection(login_name, staff_password)
         staff_password = ""
         identity = query(lecturer_connection, "EXEC dbo.sp_ThongTinDangNhap;")
-        check(tuple(identity[0]) == (magv, magv, "QLDSV_GIANGVIEN"), "Lecturer SQL identity mismatch")
+        check(tuple(identity[0]) == (login_name, magv, "QLDSV_GIANGVIEN"), "Lecturer SQL identity mismatch")
         for sql, args in (
             ("EXEC dbo.sp_GetGiangVien;", ()),
             ("EXEC dbo.sp_ThemGiangVien @MAGV=?,@PHAI=1;", (magv,)),
@@ -157,7 +160,7 @@ SELECT @CreatedSid;
         expect_business_error(lambda: service.delete_lecturer(magv), 53006)
         session.close_connection(lecturer_connection)
         lecturer_connection = None
-        query(control, "EXEC dbo.sp_XoaTaiKhoan @LoginName=?,@ExpectedSid=?;", magv, sid)
+        query(control, "EXEC dbo.sp_XoaTaiKhoan @LoginName=?,@ExpectedSid=?;", login_name, sid)
         sid = None
         assignment_uncertain = True
         query(control, "INSERT dbo.PhanCong(MAGV,MALOP,MAMH) VALUES(?,?,?);", magv, *pair)
@@ -167,7 +170,7 @@ SELECT @CreatedSid;
         assignment_owned = False
         service.delete_lecturer(magv)
         entity_owned = False
-        assert_absent(control, magv)
+        assert_absent(control, magv, login_name)
         print("PASS lecturer CRUD, SQL account boundary, real Lecturer denials, assignment guard and SID-safe deletion")
     finally:
         password = staff_password = ""
@@ -177,7 +180,7 @@ SELECT @CreatedSid;
             if control is not None:
                 operations = []
                 if sid is not None:
-                    operations.append(("EXEC dbo.sp_XoaTaiKhoan @LoginName=?,@ExpectedSid=?;", (magv, sid)))
+                    operations.append(("EXEC dbo.sp_XoaTaiKhoan @LoginName=?,@ExpectedSid=?;", (login_name, sid)))
                 if assignment_owned:
                     operations.append(("DELETE dbo.PhanCong WHERE MAGV=? AND MALOP=? AND MAMH=?;", (magv, *pair)))
                 if entity_owned:
@@ -189,7 +192,7 @@ SELECT @CreatedSid;
                         cleanup_failed = True
                 if mutation_started:
                     try:
-                        assert_absent(control, magv)
+                        assert_absent(control, magv, login_name)
                     except Exception:
                         cleanup_failed = True
         finally:

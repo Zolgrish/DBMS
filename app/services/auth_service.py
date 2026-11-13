@@ -20,17 +20,17 @@ class AuthenticationServiceError(AuthenticationError):
 
 
 class AuthService:
-    def login(self, username: str, password: str) -> User:
+    def login(self, login_name: str, password: str) -> User:
         session.clear_session()
-        username = username.strip()
-        if not username or not password:
+        login_name = login_name.strip()
+        if not login_name or not password:
             raise InvalidCredentialsError("Vui lòng nhập tên đăng nhập và mật khẩu.")
 
         qldsv = master = None
         published = False
         failure = None
         try:
-            qldsv = open_sql_connection(username, password, autocommit=True)
+            qldsv = open_sql_connection(login_name, password, autocommit=True)
             cursor = qldsv.cursor()
             try:
                 rows = cursor.execute("EXEC dbo.sp_ThongTinDangNhap;").fetchall()
@@ -38,30 +38,31 @@ class AuthService:
                 cursor.close()
             if len(rows) != 1 or len(rows[0]) != 3:
                 raise AuthenticationServiceError("SQL Server trả về danh tính không hợp lệ.")
-            login_name, database_user, sql_role = rows[0]
+            verified_login_name, database_user, sql_role = rows[0]
             roles = {"QLDSV_ADMIN": "Admin", "QLDSV_GIANGVIEN": "GiangVien", "QLDSV_SINHVIEN": "SinhVien"}
             if (
-                not isinstance(login_name, str) or not login_name.strip()
+                not isinstance(verified_login_name, str) or not verified_login_name.strip()
                 or not isinstance(database_user, str) or not database_user.strip()
                 or sql_role not in roles
             ):
                 raise AuthenticationServiceError("Mapping Login/User hoặc business role không hợp lệ.")
             role = roles[sql_role]
             user = User(
-                username=login_name,
+                username=database_user,
                 role=role,
                 masv=database_user if role == "SinhVien" else None,
                 magv=database_user if role in {"Admin", "GiangVien"} else None,
                 active=True,
+                login_name=verified_login_name,
             )
             if role == "Admin":
-                master = open_sql_connection(username, password, database_override="master", autocommit=True)
+                master = open_sql_connection(login_name, password, database_override="master", autocommit=True)
                 cursor = master.cursor()
                 try:
                     rows = cursor.execute("SELECT SUSER_SNAME();").fetchall()
                 finally:
                     cursor.close()
-                if len(rows) != 1 or rows[0][0] != login_name:
+                if len(rows) != 1 or rows[0][0] != verified_login_name:
                     raise AuthenticationServiceError("Danh tính kết nối master không khớp Login đã xác thực.")
             session.set_authenticated(user, qldsv, master)
             published = True

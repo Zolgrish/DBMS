@@ -1,7 +1,7 @@
 /* Epic 1.3 (SEC-01..07), SQL Server 2022 target; existing compatibility level is preserved.
    Run with sqlcmd -b (or SSMS SQLCMD mode) as a provisioning principal.
-   Required sqlcmd variables: QLDSV_ADMIN_LOGIN_HEX,
-   QLDSV_ADMIN_PASSWORD_HEX, QLDSV_STUDENT_LOGIN_HEX.
+   Required sqlcmd variables: QLDSV_ADMIN_LOGIN_HEX, QLDSV_ADMIN_USERNAME_HEX,
+   QLDSV_ADMIN_PASSWORD_HEX, QLDSV_STUDENT_LOGIN_HEX, QLDSV_STUDENT_USERNAME_HEX.
    Values are 0x-prefixed UTF-16LE hex, encoded by docker/init-db.sh.
    Never enable sqlcmd input echo (-e): the input contains a credential.
    Existing passwords/policy/ownership are never changed.
@@ -11,22 +11,37 @@ SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
 DECLARE @AdminInput nvarchar(max) = CONVERT(nvarchar(max), $(QLDSV_ADMIN_LOGIN_HEX));
+DECLARE @AdminUserInput nvarchar(max) = CONVERT(nvarchar(max), $(QLDSV_ADMIN_USERNAME_HEX));
 DECLARE @StudentInput nvarchar(max) = CONVERT(nvarchar(max), $(QLDSV_STUDENT_LOGIN_HEX));
+DECLARE @StudentUserInput nvarchar(max) = CONVERT(nvarchar(max), $(QLDSV_STUDENT_USERNAME_HEX));
 DECLARE @Password nvarchar(max) = CONVERT(nvarchar(max), $(QLDSV_ADMIN_PASSWORD_HEX));
-DECLARE @Admin sysname, @Student sysname, @sql nvarchar(max);
+DECLARE @Admin sysname, @AdminUser sysname, @Student sysname, @StudentUser sysname, @sql nvarchar(max);
 
 IF CONVERT(int, SERVERPROPERTY('IsIntegratedSecurityOnly')) <> 0
     THROW 51001, 'SEC-01: SQL Authentication/Mixed Mode is required. Configure the server and rerun; this script does not change authentication mode.', 1;
 IF DB_ID(N'QLDSV') IS NULL
     THROW 51002, 'SEC-02: QLDSV must exist before Security.sql.', 1;
-IF @AdminInput IS NULL OR @StudentInput IS NULL OR DATALENGTH(@AdminInput) <> 20
-   OR DATALENGTH(@StudentInput) <> 20
-   OR @AdminInput <> LTRIM(RTRIM(@AdminInput))
-   OR @StudentInput <> LTRIM(RTRIM(@StudentInput))
+IF @AdminInput IS NULL OR @StudentInput IS NULL
+   OR DATALENGTH(@AdminInput) NOT BETWEEN 2 AND 256
+   OR DATALENGTH(@StudentInput) NOT BETWEEN 2 AND 256
+   OR UNICODE(LEFT(@AdminInput,1)) IN (9,10,11,12,13,32,160)
+   OR UNICODE(RIGHT(@AdminInput,1)) IN (9,10,11,12,13,32,160)
+   OR UNICODE(LEFT(@StudentInput,1)) IN (9,10,11,12,13,32,160)
+   OR UNICODE(RIGHT(@StudentInput,1)) IN (9,10,11,12,13,32,160)
    OR @AdminInput = @StudentInput
-    THROW 51002, 'SEC-02: Distinct 10-character names required: Admin MAGV and Student MASV.', 1;
+    THROW 51002, 'SEC-02: Distinct LoginName values (1..128 UTF-16 code units) are required.', 1;
+IF @AdminUserInput IS NULL OR @StudentUserInput IS NULL
+   OR DATALENGTH(@AdminUserInput) <> 20 OR DATALENGTH(@StudentUserInput) <> 20
+   OR UNICODE(LEFT(@AdminUserInput,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
+   OR UNICODE(RIGHT(@AdminUserInput,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
+   OR UNICODE(LEFT(@StudentUserInput,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
+   OR UNICODE(RIGHT(@StudentUserInput,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
+   OR @AdminUserInput = @StudentUserInput
+    THROW 51002, 'SEC-02: Distinct 10-character DatabaseUser values are required: Admin MAGV and Student MASV.', 1;
 SET @Admin = @AdminInput;
+SET @AdminUser = @AdminUserInput;
 SET @Student = @StudentInput;
+SET @StudentUser = @StudentUserInput;
 
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -79,43 +94,52 @@ BEGIN TRY
         JOIN sys.server_principals r ON r.principal_id=rm.role_principal_id
         JOIN sys.server_principals m ON m.principal_id=rm.member_principal_id
         WHERE r.name=N'QLDSV_ACCOUNT_ADMIN' AND
-              (m.type<>'S' OR m.principal_id=1 OR NOT EXISTS (
+              (m.type<>'S' OR m.principal_id=1
+               OR (SELECT COUNT(*) FROM sys.database_principals u
+                   WHERE u.sid=m.sid AND u.type='S' AND u.authentication_type=1 AND u.principal_id>4)<>1
+               OR NOT EXISTS (
                   SELECT 1 FROM sys.database_principals u
-                  WHERE u.name=m.name AND u.sid=m.sid AND u.type='S' AND u.authentication_type=1 AND u.principal_id>4
+                  WHERE u.sid=m.sid AND u.type='S' AND u.authentication_type=1 AND u.principal_id>4
                     AND ISNULL(IS_ROLEMEMBER(N'QLDSV_ADMIN',u.name),-1)=1
                     AND ISNULL(IS_ROLEMEMBER(N'QLDSV_GIANGVIEN',u.name),-1)=0
                     AND ISNULL(IS_ROLEMEMBER(N'QLDSV_SINHVIEN',u.name),-1)=0)))
         THROW 51007, 'SEC-04: Invalid QLDSV_ACCOUNT_ADMIN member. Require a SQL Login mapped by SID to a QLDSV Admin User without Lecturer/Student membership. Review and explicitly correct membership/mapping, then rerun; no automatic changes were made.', 1;
-    IF @Admin IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
-       OR @Student IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
+    IF @Admin IN (N'sa', N'dbo', N'guest', N'public', N'sys', N'INFORMATION_SCHEMA', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
+       OR @Student IN (N'sa', N'dbo', N'guest', N'public', N'sys', N'INFORMATION_SCHEMA', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
+       OR @Admin LIKE N'##%' OR @Admin LIKE N'db[_]%' OR @Admin LIKE N'NT %'
+       OR @Student LIKE N'##%' OR @Student LIKE N'db[_]%' OR @Student LIKE N'NT %'
         THROW 51002, 'SEC-02: Reserved principal name.', 1;
-    IF NOT EXISTS (SELECT 1 FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV = @Admin)
-        THROW 51002, 'SEC-02: Bootstrap Admin must match an existing Giangvien.MAGV.', 1;
-    IF NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WITH (UPDLOCK,HOLDLOCK) WHERE MASV = @Student)
-        THROW 51002, 'SEC-02: Student demo login must match an existing Sinhvien.MASV. Run seedData.sql first.', 1;
+    IF @AdminUser IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
+       OR @StudentUser IN (N'dbo', N'guest', N'public', N'QLDSV_ADMIN', N'QLDSV_SINHVIEN', N'QLDSV_GIANGVIEN', N'QLDSV_ACCOUNT_ADMIN')
+        THROW 51002, 'SEC-02: Reserved Database User name.', 1;
+    IF NOT EXISTS (SELECT 1 FROM dbo.Giangvien WITH (UPDLOCK,HOLDLOCK) WHERE MAGV = @AdminUser)
+        THROW 51002, 'SEC-02: Bootstrap Admin DatabaseUser must match an existing Giangvien.MAGV.', 1;
+    IF NOT EXISTS (SELECT 1 FROM dbo.Sinhvien WITH (UPDLOCK,HOLDLOCK) WHERE MASV = @StudentUser)
+        THROW 51002, 'SEC-02: Student demo DatabaseUser must match an existing Sinhvien.MASV. Run seedData.sql first.', 1;
     IF EXISTS (SELECT 1 FROM sys.databases WHERE database_id = DB_ID()
                AND owner_sid IN (SUSER_SID(@Admin), SUSER_SID(@Student)))
         THROW 51002, 'SEC-02: A demo login owns QLDSV; expected a separate mapped database user.', 1;
     IF EXISTS (SELECT 1 FROM sys.database_principals
-               WHERE name IN (@Admin, @Student)
-                 AND (type <> 'S' OR authentication_type <> 1
-                      OR SUSER_SID(name) IS NULL OR sid <> SUSER_SID(name)))
+               WHERE (name=@AdminUser AND (type<>'S' OR authentication_type<>1
+                                           OR SUSER_SID(@Admin) IS NULL OR sid<>SUSER_SID(@Admin)))
+                  OR (name=@StudentUser AND (type<>'S' OR authentication_type<>1
+                                             OR SUSER_SID(@Student) IS NULL OR sid<>SUSER_SID(@Student))))
         THROW 51002, 'SEC-02: Existing database user has incompatible type/SID/login mapping. No automatic remap performed.', 1;
     IF EXISTS (SELECT 1 FROM sys.database_principals
-               WHERE sid IN (SUSER_SID(@Admin), SUSER_SID(@Student))
-                 AND name NOT IN (@Admin, @Student))
-        THROW 51002, 'SEC-02: Login SID already maps to a differently named database user.', 1;
+               WHERE (SUSER_SID(@Admin) IS NOT NULL AND sid=SUSER_SID(@Admin) AND name<>@AdminUser)
+                  OR (SUSER_SID(@Student) IS NOT NULL AND sid=SUSER_SID(@Student) AND name<>@StudentUser))
+        THROW 51002, 'SEC-02: Login SID maps to an unexpected Database User.', 1;
     IF EXISTS (SELECT 1 FROM sys.database_role_members rm
                JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id
                JOIN sys.database_principals m ON m.principal_id = rm.member_principal_id
-               WHERE (m.name = @Admin AND r.name <> N'QLDSV_ADMIN')
-                  OR (m.name = @Student AND r.name <> N'QLDSV_SINHVIEN')
+               WHERE (m.name = @AdminUser AND r.name <> N'QLDSV_ADMIN')
+                  OR (m.name = @StudentUser AND r.name <> N'QLDSV_SINHVIEN')
                   OR m.name IN (N'QLDSV_ADMIN', N'QLDSV_GIANGVIEN', N'QLDSV_SINHVIEN'))
         THROW 51003, 'SEC-03: Conflicting/nested database role membership exists. Resolve it explicitly; application users must belong to exactly one of three business roles.', 1;
     IF EXISTS (SELECT 1 FROM sys.schemas
-               WHERE principal_id IN (DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')))
+               WHERE principal_id IN (DATABASE_PRINCIPAL_ID(@StudentUser), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')))
        OR EXISTS (SELECT 1 FROM sys.objects
-                  WHERE principal_id IN (DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')))
+                  WHERE principal_id IN (DATABASE_PRINCIPAL_ID(@StudentUser), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN')))
         THROW 51005, 'SEC-05: Student user/role must not own schemas or objects.', 1;
     -- All existing application members must already satisfy the identity and
     -- privilege contracts. Drift is reported, never silently remapped/repaired.
@@ -125,7 +149,8 @@ BEGIN TRY
         JOIN sys.database_principals u ON u.principal_id=rm.member_principal_id
         WHERE r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN') AND (
             u.type<>'S' OR u.authentication_type<>1 OR u.principal_id<=4
-            OR SUSER_SID(u.name) IS NULL OR u.sid<>SUSER_SID(u.name)
+            OR (SELECT COUNT(*) FROM sys.server_principals l
+                WHERE l.sid=u.sid AND l.type='S' AND l.principal_id<>1)<>1
             OR DATALENGTH(u.name)<>20
             OR (SELECT COUNT(*) FROM sys.database_role_members x
                 JOIN sys.database_principals y ON y.principal_id=x.role_principal_id
@@ -139,7 +164,7 @@ BEGIN TRY
         SELECT 1 FROM sys.database_role_members rm
         JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
         JOIN sys.database_principals u ON u.principal_id=rm.member_principal_id
-        JOIN sys.sql_logins l ON l.sid=u.sid AND l.name=u.name
+        JOIN sys.sql_logins l ON l.sid=u.sid
         WHERE r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN') AND (
             (r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN') AND l.is_policy_checked<>1)
             OR (r.name=N'QLDSV_SINHVIEN' AND l.is_policy_checked<>0)
@@ -163,17 +188,26 @@ BEGIN TRY
                   AND p.state IN ('G','W') AND NOT (
                     (p.class=0 AND p.permission_name=N'CONNECT' AND p.state='G') OR
                     (p.class=1 AND p.major_id IN (ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'),-1),
-                                                ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1))
+                                                ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_GiangVien_XemHoSo'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_GiangVien_XemPhanCong'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_GiangVien_XemSinhVienLop'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_Diem_GetLopChoNhapDiem'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_Diem_GetMonHocChoNhapDiem'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_Diem_LayDanhSachNhapDiem'),-1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_Diem_LuuDiem'),-1))
                      AND p.permission_name=N'EXECUTE' AND p.state='G')))
         THROW 51005, 'SEC-05: Lecturer has unexpected ownership/grants. Resolve explicitly before rerunning.', 1;
     -- Only the safe Epic 1.4/1.7 object grants; never broad EXECUTE.
     IF EXISTS (SELECT 1 FROM sys.database_permissions p
-               WHERE p.grantee_principal_id IN (DATABASE_PRINCIPAL_ID(@Student), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN'))
+               WHERE p.grantee_principal_id IN (DATABASE_PRINCIPAL_ID(@StudentUser), DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN'))
                  AND p.state IN ('G', 'W') AND NOT
                  ((p.class = 0 AND p.permission_name = N'CONNECT') OR
                   (p.class = 1 AND p.major_id IN (ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemDiem'), -1),
                                                 ISNULL(OBJECT_ID(N'dbo.sp_ThongTinDangNhap'), -1),
-                                                ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'), -1))
+                                                ISNULL(OBJECT_ID(N'dbo.sp_DoiMatKhau'), -1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemHoSoVaLop'), -1),
+                                                ISNULL(OBJECT_ID(N'dbo.sp_SinhVien_XemMonHoc'), -1))
                    AND p.permission_name = N'EXECUTE' AND p.state = 'G')))
         THROW 51005, 'SEC-05: Unexpected Student grants exist. Remove unsafe grants explicitly before rerunning.', 1;
 
@@ -229,26 +263,26 @@ BEGIN TRY
     END;
 
     USE QLDSV;
-    IF DATABASE_PRINCIPAL_ID(@Admin) IS NULL
+    IF DATABASE_PRINCIPAL_ID(@AdminUser) IS NULL
     BEGIN
-        SET @sql = N'CREATE USER ' + QUOTENAME(@Admin) + N' FOR LOGIN ' + QUOTENAME(@Admin) + N' WITH DEFAULT_SCHEMA = dbo;';
+        SET @sql = N'CREATE USER ' + QUOTENAME(@AdminUser) + N' FOR LOGIN ' + QUOTENAME(@Admin) + N' WITH DEFAULT_SCHEMA = dbo;';
         EXEC (@sql);
     END;
-    IF DATABASE_PRINCIPAL_ID(@Student) IS NULL
+    IF DATABASE_PRINCIPAL_ID(@StudentUser) IS NULL
     BEGIN
-        SET @sql = N'CREATE USER ' + QUOTENAME(@Student) + N' FOR LOGIN ' + QUOTENAME(@Student) + N' WITH DEFAULT_SCHEMA = dbo;';
-        EXEC (@sql);
-    END;
-    IF NOT EXISTS (SELECT 1 FROM sys.database_role_members
-                   WHERE role_principal_id = DATABASE_PRINCIPAL_ID(N'QLDSV_ADMIN') AND member_principal_id = DATABASE_PRINCIPAL_ID(@Admin))
-    BEGIN
-        SET @sql = N'ALTER ROLE QLDSV_ADMIN ADD MEMBER ' + QUOTENAME(@Admin) + N';';
+        SET @sql = N'CREATE USER ' + QUOTENAME(@StudentUser) + N' FOR LOGIN ' + QUOTENAME(@Student) + N' WITH DEFAULT_SCHEMA = dbo;';
         EXEC (@sql);
     END;
     IF NOT EXISTS (SELECT 1 FROM sys.database_role_members
-                   WHERE role_principal_id = DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN') AND member_principal_id = DATABASE_PRINCIPAL_ID(@Student))
+                   WHERE role_principal_id = DATABASE_PRINCIPAL_ID(N'QLDSV_ADMIN') AND member_principal_id = DATABASE_PRINCIPAL_ID(@AdminUser))
     BEGIN
-        SET @sql = N'ALTER ROLE QLDSV_SINHVIEN ADD MEMBER ' + QUOTENAME(@Student) + N';';
+        SET @sql = N'ALTER ROLE QLDSV_ADMIN ADD MEMBER ' + QUOTENAME(@AdminUser) + N';';
+        EXEC (@sql);
+    END;
+    IF NOT EXISTS (SELECT 1 FROM sys.database_role_members
+                   WHERE role_principal_id = DATABASE_PRINCIPAL_ID(N'QLDSV_SINHVIEN') AND member_principal_id = DATABASE_PRINCIPAL_ID(@StudentUser))
+    BEGIN
+        SET @sql = N'ALTER ROLE QLDSV_SINHVIEN ADD MEMBER ' + QUOTENAME(@StudentUser) + N';';
         EXEC (@sql);
     END;
     GRANT CONNECT TO QLDSV_GIANGVIEN;

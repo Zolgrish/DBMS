@@ -24,7 +24,7 @@ from app.utils import session
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ADMIN = User("GV00000001", "Admin", None, "GV00000001", True)
+ADMIN = User("GV00000001", "Admin", None, "GV00000001", True, login_name="admin_sql_login")
 LECTURER = Lecturer("GV00000004", "Nguyễn", "An", True)
 
 
@@ -353,7 +353,7 @@ class LecturerUiTests(unittest.TestCase):
         self.addCleanup(admin.close)
         self.assertIs(admin._account_service, account_service)
         labels = [b.text() for b in admin.findChildren(QPushButton) if b.objectName() == "actionButton"]
-        self.assertEqual(labels, ["Quản lý sinh viên", "Quản lý giảng viên", "Quản lý môn học", "Quản lý tài khoản",
+        self.assertEqual(labels, ["Quản lý lớp", "Quản lý sinh viên", "Quản lý giảng viên", "Quản lý môn học", "Phân công giảng dạy", "Quản lý tài khoản",
                                   "Nhập điểm", "Đổi mật khẩu", "Sao lưu / Phục hồi"])
         with patch("app.ui.admin_dashboard.LecturerManagementDialog") as dialog_class:
             admin._handle_action("Quản lý giảng viên")
@@ -379,7 +379,10 @@ class LecturerSqlContractTests(unittest.TestCase):
             guard = body[:body.index("BEGIN TRY")]
             for role, expected in (("ADMIN", 1), ("GIANGVIEN", 0), ("SINHVIEN", 0)):
                 self.assertIn(f"ISNULL(IS_ROLEMEMBER(N'QLDSV_{role}'),-1)<>{expected}", guard)
-            for text in ("ORIGINAL_LOGIN()<>SUSER_SNAME()", "USER_NAME()<>SUSER_SNAME()", "sid=SUSER_SID()", "THROW 53001"):
+            for text in ("ORIGINAL_LOGIN()<>SUSER_SNAME()", "name=USER_NAME()", "sid=SUSER_SID()",
+                         "member_principal_id=DATABASE_PRINCIPAL_ID(USER_NAME())",
+                         "r.name=N'QLDSV_ADMIN'", "r.type='R'",
+                         "r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo')", "THROW 53001"):
                 self.assertIn(text, guard)
 
     def test_mutations_use_transactions_validation_and_safe_rollback(self):
@@ -397,7 +400,7 @@ class LecturerSqlContractTests(unittest.TestCase):
 
     def test_add_rejects_duplicate_and_principal_drift_before_insert(self):
         body = self.bodies["sp_ThemGiangVien"]
-        for text in ("THROW 53003", "sys.server_principals WHERE name=@MAGV", "sys.database_principals WHERE name=@MAGV", "THROW 53006"):
+        for text in ("THROW 53003", "sys.database_principals WHERE name=@MAGV", "THROW 53006"):
             self.assertIn(text, body)
             self.assertLess(body.index(text), body.index("INSERT dbo.Giangvien"))
         self.assertIn("HAS_PERMS_BY_NAME(NULL,NULL,N'ALTER ANY LOGIN')", body)
@@ -418,7 +421,7 @@ class LecturerSqlContractTests(unittest.TestCase):
         lock = re.search(r"FROM\s+dbo\.Giangvien\s+WITH\s*\(UPDLOCK,\s*HOLDLOCK\)\s+WHERE\s+MAGV=@MAGV", body)
         self.assertIsNotNone(lock)
         self.assertLess(body.index("BEGIN TRANSACTION"), lock.start())
-        for text in ("sys.server_principals", "sys.database_principals WHERE name=@MAGV", "FROM dbo.PhanCong", "DELETE FROM dbo.Giangvien"):
+        for text in ("sys.database_principals WHERE name=@MAGV", "FROM dbo.PhanCong", "DELETE FROM dbo.Giangvien"):
             # The caller's mapping guard uses metadata too; compare only the transaction body.
             self.assertLess(lock.start(), body.index(text, body.index("BEGIN TRANSACTION")))
         self.assertIn("dbo.PhanCong WITH (UPDLOCK,HOLDLOCK)", body)
@@ -455,7 +458,9 @@ class LecturerSqlContractTests(unittest.TestCase):
         self.assertIn("@CreatedSid=@CreatedSid OUTPUT", source)
         self.assertIn("@ExpectedSid=?", source)
         self.assertIn("WHERE MAGV=? AND MALOP=? AND MAMH=?", source)
-        self.assertIn("preflight(control, magv)", source)
+        self.assertIn("preflight(control, magv, login_name)", source)
+        self.assertIn("@DatabaseUser=?", source)
+        self.assertIn("(login_name, magv, \"QLDSV_GIANGVIEN\")", source)
         self.assertLess(source.index("pair = preflight"), source.index("service.create_lecturer"))
         self.assertIn("finally:", source)
         for forbidden in ("-U sa", "KILL ", "RESTORE DATABASE", "docker compose"):

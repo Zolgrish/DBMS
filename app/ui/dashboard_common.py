@@ -61,7 +61,10 @@ class DashboardWindow(QMainWindow):
         account_layout.setSpacing(16)
         account_caption = QLabel("ĐANG ĐĂNG NHẬP")
         account_caption.setObjectName("accountCaption")
-        account_name = QLabel(user.username)
+        account_name = QLabel(
+            f"{user.username} (SQL Login: {user.login_name})"
+            if user.login_name != user.username else user.username
+        )
         account_name.setObjectName("accountName")
         role_label = QLabel(user.role)
         role_label.setObjectName("roleBadge")

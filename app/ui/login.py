@@ -42,15 +42,17 @@ class LoginWindow(QMainWindow):
 
         form = QFormLayout()
         form.setSpacing(12)
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Nhập tên đăng nhập")
-        self.username_input.setObjectName("usernameInput")
+        self.login_name_input = QLineEdit()
+        self.login_name_input.setPlaceholderText("Nhập SQL Server Login")
+        self.login_name_input.setObjectName("usernameInput")
+        # Compatibility alias for existing tests/integrations.
+        self.username_input = self.login_name_input
         self.password_input = QLineEdit()
         self.password_input.setPlaceholderText("Nhập mật khẩu")
         self.password_input.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_input.setObjectName("passwordInput")
         self.password_input.returnPressed.connect(self._login)
-        form.addRow("Tên đăng nhập", self.username_input)
+        form.addRow("SQL Login", self.login_name_input)
         form.addRow("Mật khẩu", self.password_input)
 
         buttons = QHBoxLayout()
@@ -84,7 +86,7 @@ class LoginWindow(QMainWindow):
         failure = None
         try:
             user = self._auth_service.login(
-                self.username_input.text(), self.password_input.text()
+                self.login_name_input.text(), self.password_input.text()
             )
         except AuthenticationError as error:
             failure = error
@@ -100,7 +102,7 @@ class LoginWindow(QMainWindow):
 
     def prepare_for_logout(self) -> None:
         self.password_input.clear()
-        self.username_input.setFocus()
+        self.login_name_input.setFocus()
 
     def closeEvent(self, event) -> None:
         from app.utils import session

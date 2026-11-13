@@ -99,7 +99,7 @@ WHERE p.state IN('G','W') AND p.class=0
     check(rows[0][0] == 0, "Unexpected non-Admin database backup/control grants")
     rows = query(session.require_qldsv_connection(), """
 SELECT COUNT(*) FROM sys.database_principals u
-JOIN sys.server_principals sp ON sp.name=u.name AND sp.sid=u.sid
+JOIN sys.server_principals sp ON sp.sid=u.sid
 WHERE (IS_ROLEMEMBER(N'QLDSV_SINHVIEN',u.name)=1 OR IS_ROLEMEMBER(N'QLDSV_GIANGVIEN',u.name)=1)
  AND (EXISTS(SELECT 1 FROM sys.server_role_members WHERE member_principal_id=sp.principal_id)
  OR EXISTS(SELECT 1 FROM sys.server_permissions WHERE grantee_principal_id=sp.principal_id
@@ -115,11 +115,11 @@ WHERE (IS_ROLEMEMBER(N'QLDSV_SINHVIEN',u.name)=1 OR IS_ROLEMEMBER(N'QLDSV_GIANGV
             if not name or not password:
                 print("SKIP real " + prefix + " permission query: optional current credential unavailable; metadata audit only")
                 continue
-            check(len(name.encode("utf-16-le")) == 20, "Non-Admin must be a mapped business identity")
             connection = open_sql_connection(name, password)  # QLDSV only; never publish a master session.
             password = ""
             identity = query(connection, "EXEC dbo.sp_ThongTinDangNhap;")
-            check(len(identity) == 1 and tuple(identity[0]) == (name, name, expected), "Non-Admin identity mismatch")
+            check(len(identity) == 1 and identity[0][0] == name and identity[0][2] == expected
+                  and bool(identity[0][1]), "Non-Admin identity mismatch")
             row = query(connection, """
 SELECT HAS_PERMS_BY_NAME(DB_NAME(),N'DATABASE',N'BACKUP DATABASE'),
        HAS_PERMS_BY_NAME(DB_NAME(),N'DATABASE',N'BACKUP LOG'),
@@ -208,7 +208,8 @@ END CATCH;
 
 def main():
     admin = os.getenv("QLDSV_ADMIN_LOGIN", "GV00000001")
-    check(len(admin.encode("utf-16-le")) == 20, "Application Admin must be an existing MAGV; system principals forbidden")
+    admin_user = os.getenv("QLDSV_ADMIN_USERNAME") or admin
+    check(admin.lower() not in {"sa", "dbo"} and bool(admin.strip()), "Application Admin must be a mapped SQL Login; system principals forbidden")
     password = os.getenv("QLDSV_ADMIN_PASSWORD")
     if not password:
         if not sys.stdin.isatty():
@@ -220,7 +221,8 @@ def main():
     restore_succeeded = False
     try:
         user = AuthService().login(admin, password)
-        check(user.role == "Admin" and user.username == user.magv == admin, "Require real mapped application Admin")
+        check(user.role == "Admin" and user.login_name == admin and user.username == admin_user == user.magv,
+              "Require real mapped application Admin")
         service = BackupRestoreService()
         host = preflight(service, admin)
         audit_nonadmin_permissions()

@@ -145,6 +145,25 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 55010, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
+
     IF NOT EXISTS (
         SELECT 1
         FROM sys.database_principals dp
@@ -156,7 +175,7 @@ BEGIN
 
     SELECT MAGV, HO, TEN, PHAI
     FROM dbo.Giangvien
-    WHERE MAGV = @Caller;
+    WHERE MAGV = @DatabaseUser;
 END;
 GO
 
@@ -172,6 +191,24 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 55010, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
     IF NOT EXISTS (
         SELECT 1
         FROM sys.database_principals dp
@@ -191,7 +228,7 @@ BEGIN
     FROM dbo.PhanCong pc
     JOIN dbo.Lop l ON l.MALOP = pc.MALOP
     JOIN dbo.Monhoc mh ON mh.MAMH = pc.MAMH
-    WHERE pc.MAGV = @Caller
+    WHERE pc.MAGV = @DatabaseUser
     ORDER BY pc.MALOP, pc.MAMH;
 END;
 GO
@@ -212,8 +249,26 @@ BEGIN
 
     SET @MALOP = NULLIF(LTRIM(RTRIM(@MALOP)), N'');
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
     DECLARE @IsAdmin bit = 0;
     DECLARE @IsGV bit = 0;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 55010, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
 
     SELECT
         @IsAdmin = MAX(CASE WHEN r.name = N'QLDSV_ADMIN' THEN 1 ELSE 0 END),
@@ -229,7 +284,7 @@ BEGIN
 
     IF ISNULL(@IsAdmin, 0) = 0
     BEGIN
-        IF NOT EXISTS (SELECT 1 FROM dbo.PhanCong WHERE MAGV = @Caller AND MALOP = @MALOP)
+        IF NOT EXISTS (SELECT 1 FROM dbo.PhanCong WHERE MAGV = @DatabaseUser AND MALOP = @MALOP)
             THROW 55011, N'Bạn không được phân công giảng dạy lớp này.', 1;
     END;
 
@@ -265,6 +320,24 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 55020, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
     IF NOT EXISTS (
         SELECT 1
         FROM sys.database_principals dp
@@ -288,7 +361,7 @@ BEGIN
         sv.NGHIHOC
     FROM dbo.Sinhvien sv
     JOIN dbo.Lop l ON l.MALOP = sv.MALOP
-    WHERE sv.MASV = @Caller;
+    WHERE sv.MASV = @DatabaseUser;
 END;
 GO
 
@@ -304,18 +377,47 @@ BEGIN
     SET NOCOUNT ON;
 
     DECLARE @Caller sysname = ORIGINAL_LOGIN();
+    DECLARE @DatabaseUser sysname;
+    DECLARE @MALOP nchar(8);
+
+    IF (
+        SELECT COUNT(*)
+        FROM sys.database_principals dp
+        WHERE dp.sid = SUSER_SID(@Caller)
+          AND dp.type = 'S'
+          AND dp.authentication_type = 1
+          AND dp.principal_id > 4
+    ) <> 1
+        THROW 55020, N'Không thể xác định Database User của phiên hiện tại.', 1;
+
+    SELECT @DatabaseUser = dp.name
+    FROM sys.database_principals dp
+    WHERE dp.sid = SUSER_SID(@Caller)
+      AND dp.type = 'S'
+      AND dp.authentication_type = 1
+      AND dp.principal_id > 4;
+
     IF NOT EXISTS (
         SELECT 1
         FROM sys.database_principals dp
         JOIN sys.database_role_members rm ON rm.member_principal_id = dp.principal_id
         JOIN sys.database_principals r ON r.principal_id = rm.role_principal_id
-        WHERE dp.sid = SUSER_SID(@Caller) AND r.name IN (N'QLDSV_ADMIN', N'QLDSV_SINHVIEN')
+        WHERE dp.sid = SUSER_SID(@Caller) AND r.name = N'QLDSV_SINHVIEN'
     )
-        THROW 55020, N'Không có quyền xem danh sách môn học.', 1;
+        THROW 55020, N'Chỉ Sinh viên mới có quyền xem môn học của lớp mình.', 1;
 
-    SELECT MAMH, TENMH, SoTCLT, SoTCTH
-    FROM dbo.Monhoc
-    ORDER BY MAMH;
+    SELECT @MALOP = sv.MALOP
+    FROM dbo.Sinhvien sv
+    WHERE sv.MASV = @DatabaseUser;
+
+    IF @MALOP IS NULL
+        THROW 55020, N'Database User không xác định được lớp của Sinh viên hiện tại.', 1;
+
+    SELECT DISTINCT mh.MAMH, mh.TENMH, mh.SoTCLT, mh.SoTCTH
+    FROM dbo.PhanCong pc
+    JOIN dbo.Monhoc mh ON mh.MAMH = pc.MAMH
+    WHERE pc.MALOP = @MALOP
+    ORDER BY mh.MAMH;
 END;
 GO
 
@@ -335,7 +437,7 @@ DENY EXECUTE ON OBJECT::dbo.sp_GiangVien_XemSinhVienLop TO QLDSV_SINHVIEN;
 
 GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemHoSoVaLop TO QLDSV_SINHVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_SinhVien_XemHoSoVaLop TO QLDSV_GIANGVIEN;
-GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemMonHoc TO QLDSV_ADMIN, QLDSV_SINHVIEN;
+GRANT EXECUTE ON OBJECT::dbo.sp_SinhVien_XemMonHoc TO QLDSV_SINHVIEN;
 DENY EXECUTE ON OBJECT::dbo.sp_SinhVien_XemMonHoc TO QLDSV_GIANGVIEN;
 GO
 
