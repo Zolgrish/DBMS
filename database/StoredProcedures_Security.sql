@@ -63,8 +63,6 @@ BEGIN
        OR UNICODE(RIGHT(@UserName,1)) IN (9,10,11,12,13,28,29,30,31,32,133,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288)
         THROW 52002, 'DatabaseUser must contain exactly 10 UTF-16 code units without surrounding whitespace.', 1;
     SET @BusinessRole=CONVERT(sysname,@Role);
-    IF NOT EXISTS (SELECT 1 FROM sys.database_principals WHERE name=@BusinessRole AND type='R')
-        THROW 52008, 'Expected business role missing; run Security.sql first.', 1;
     IF @BusinessRole=N'QLDSV_SINHVIEN'
     BEGIN
         IF @Password IS NOT NULL AND DATALENGTH(@Password)<>0
@@ -82,6 +80,11 @@ BEGIN
     DECLARE @sql nvarchar(max), @Error int, @Message nvarchar(2048);
     BEGIN TRY
         BEGIN TRANSACTION;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+              AND type='R' AND is_fixed_role=0
+              AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+            THROW 52008, 'Expected business roles are missing or invalid; run Security.sql and resolve drift first.', 1;
         -- Keep the Student entity valid until principal creation commits,
         -- including when the caller holds an enclosing transaction open.
         IF @BusinessRole=N'QLDSV_SINHVIEN'
@@ -121,6 +124,11 @@ BEGIN
         SET @CreatedSid=SUSER_SID(@Name);
         IF @CreatedSid IS NULL
             THROW 52009, 'Account creation did not produce a SQL Login SID.', 1;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+              AND type='R' AND is_fixed_role=0
+              AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+            THROW 52008, 'Expected business roles changed during account creation; operation rolled back.', 1;
         COMMIT TRANSACTION;
     END TRY
     BEGIN CATCH
@@ -177,28 +185,39 @@ BEGIN
         THROW 52014, 'Self-delete is forbidden; use a different Admin connection.', 1;
     BEGIN TRY
         BEGIN TRANSACTION;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+              AND type='R' AND is_fixed_role=0
+              AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+            THROW 52008, 'Expected business roles are missing or invalid; run Security.sql and resolve drift first.', 1;
         SELECT @Sid=sid,@LoginId=principal_id FROM sys.server_principals
         WHERE name=@Name AND type='S' AND principal_id<>1;
         IF @Sid IS NULL
             THROW 52010, 'Target must be an existing non-system SQL Login (enabled or disabled).', 1;
         IF @Sid=SUSER_SID()
             THROW 52014, 'Self-delete is forbidden; use a different Admin connection.', 1;
-        IF @ExpectedSid IS NOT NULL AND @Sid<>@ExpectedSid
+        IF @ExpectedSid IS NULL OR DATALENGTH(@ExpectedSid)=0 OR @Sid<>@ExpectedSid
             THROW 52016, 'Target principal identity changed; deletion refused.', 1;
         IF (SELECT COUNT(*) FROM sys.database_principals
             WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4)<>1
             THROW 52011, 'Target Login must map by SID to exactly one QLDSV Database User.', 1;
         SELECT @UserId=principal_id,@UserName=name FROM sys.database_principals
         WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4;
-        IF (SELECT COUNT(*) FROM sys.database_role_members rm
-            JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-            WHERE rm.member_principal_id=@UserId AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))<>1
-           OR EXISTS (SELECT 1 FROM sys.database_role_members rm
-                      JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-                      WHERE rm.member_principal_id=@UserId AND r.name NOT IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))
+        IF (SELECT COUNT(*) FROM sys.database_role_members
+            WHERE member_principal_id=@UserId)<>1
+           OR NOT EXISTS (SELECT 1 FROM sys.database_role_members rm
+                          JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+                          WHERE rm.member_principal_id=@UserId
+                            AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+                            AND r.type='R' AND r.is_fixed_role=0
+                            AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
             THROW 52012, 'Target must belong to exactly one business role and no unrelated database roles.', 1;
         SELECT @BusinessRole=r.name FROM sys.database_role_members rm
-        JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id WHERE rm.member_principal_id=@UserId;
+        JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+        WHERE rm.member_principal_id=@UserId
+          AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+          AND r.type='R' AND r.is_fixed_role=0
+          AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo');
         IF DATALENGTH(@UserName)<>20
            OR (@BusinessRole IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN')
                AND NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV=@UserName))
@@ -236,6 +255,11 @@ BEGIN
             +N'DROP LOGIN '+QUOTENAME(@Name)+N';';
         EXEC sys.sp_executesql @sql, N'@Name sysname, @UserName sysname, @Sid varbinary(85)',
             @Name=@Name, @UserName=@UserName, @Sid=@Sid;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+              AND type='R' AND is_fixed_role=0
+              AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+            THROW 52008, 'Expected business roles changed during account deletion; operation rolled back.', 1;
         COMMIT TRANSACTION;
     END TRY
     BEGIN CATCH
@@ -296,28 +320,39 @@ BEGIN
 
     BEGIN TRY
         BEGIN TRANSACTION;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+              AND type='R' AND is_fixed_role=0
+              AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+            THROW 52008, 'Expected business roles are missing or invalid; run Security.sql and resolve drift first.', 1;
         SELECT @Sid=sid,@LoginId=principal_id FROM sys.server_principals
         WHERE name=@Name AND type='S' AND principal_id<>1;
         IF @Sid IS NULL
             THROW 52010, 'Target must be an existing non-system SQL Login.', 1;
         IF @Sid=SUSER_SID()
             THROW 52018, 'Changing the current Login status is forbidden; use another Admin connection.', 1;
-        IF @ExpectedSid IS NOT NULL AND @Sid<>@ExpectedSid
+        IF @ExpectedSid IS NULL OR DATALENGTH(@ExpectedSid)=0 OR @Sid<>@ExpectedSid
             THROW 52016, 'Target principal identity changed; status update refused.', 1;
         IF (SELECT COUNT(*) FROM sys.database_principals
             WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4)<>1
             THROW 52011, 'Target Login must map by SID to exactly one QLDSV Database User.', 1;
         SELECT @UserId=principal_id,@UserName=name FROM sys.database_principals
         WHERE type='S' AND authentication_type=1 AND sid=@Sid AND principal_id>4;
-        IF (SELECT COUNT(*) FROM sys.database_role_members rm
-            JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-            WHERE rm.member_principal_id=@UserId AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))<>1
-           OR EXISTS (SELECT 1 FROM sys.database_role_members rm
-                      JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
-                      WHERE rm.member_principal_id=@UserId AND r.name NOT IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'))
+        IF (SELECT COUNT(*) FROM sys.database_role_members
+            WHERE member_principal_id=@UserId)<>1
+           OR NOT EXISTS (SELECT 1 FROM sys.database_role_members rm
+                          JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+                          WHERE rm.member_principal_id=@UserId
+                            AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+                            AND r.type='R' AND r.is_fixed_role=0
+                            AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))
             THROW 52012, 'Target must belong to exactly one business role and no unrelated database roles.', 1;
         SELECT @BusinessRole=r.name FROM sys.database_role_members rm
-        JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id WHERE rm.member_principal_id=@UserId;
+        JOIN sys.database_principals r ON r.principal_id=rm.role_principal_id
+        WHERE rm.member_principal_id=@UserId
+          AND r.name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+          AND r.type='R' AND r.is_fixed_role=0
+          AND r.owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo');
         IF DATALENGTH(@UserName)<>20
            OR (@BusinessRole IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN')
                AND NOT EXISTS (SELECT 1 FROM dbo.Giangvien WHERE MAGV=@UserName))
@@ -344,6 +379,11 @@ BEGIN
             THROW 52016, 'Target principal identity changed; status update refused.', 1;
         IF NOT EXISTS (SELECT 1 FROM sys.sql_logins WHERE principal_id=@LoginId AND is_disabled=@Disable)
             THROW 52019, 'SQL Login status did not change to the requested value.', 1;
+        IF (SELECT COUNT(*) FROM sys.database_principals
+            WHERE name IN (N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')
+              AND type='R' AND is_fixed_role=0
+              AND owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo'))<>3
+            THROW 52008, 'Expected business roles changed during account status update; operation rolled back.', 1;
         COMMIT TRANSACTION;
     END TRY
     BEGIN CATCH

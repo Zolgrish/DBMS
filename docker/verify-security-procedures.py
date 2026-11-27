@@ -39,12 +39,55 @@ EXEC dbo.sp_TaoTaiKhoan @LoginName=@n,@DatabaseUser=@u,@Role=@r,@Password=@p;
 """
 
 
-def delete_query(name):
-    return f"DECLARE @n nvarchar(max)={value(name)}; EXEC dbo.sp_XoaTaiKhoan @LoginName=@n;"
+def _sid_literal(expected_sid):
+    sid = str(expected_sid).strip()
+    if not sid.startswith("0x") or len(sid) <= 2 or any(ch not in "0123456789abcdefABCDEF" for ch in sid[2:]):
+        raise ValueError("ExpectedSid must be a non-empty 0x-prefixed SQL varbinary literal")
+    return sid
 
 
-def status_query(name, disabled, expected_sid=None):
-    sid = "NULL" if expected_sid is None else expected_sid
+def create_managed_account(admin, password, name, role, account_password=None, database_user=None):
+    database_user = name if database_user is None else database_user
+    result = base.sql(admin, password, f"""
+SET NOCOUNT ON;
+DECLARE @n nvarchar(max)={value(name)},
+        @u nvarchar(max)={value(database_user)},
+        @r nvarchar(max)={value(role)},
+        @p nvarchar(max)={value(account_password)};
+DECLARE @CreatedSid varbinary(85);
+EXEC dbo.sp_TaoTaiKhoan @LoginName=@n,@DatabaseUser=@u,
+     @Role=@r,@Password=@p,@CreatedSid=@CreatedSid OUTPUT;
+IF @CreatedSid IS NULL THROW 52114, 'Managed account creation returned no ownership SID.', 1;
+SELECT CONVERT(varchar(max),@CreatedSid,1);
+""")
+    sid = next((line.strip() for line in result.stdout.splitlines() if line.strip().startswith("0x")), "")
+    if not sid:
+        raise RuntimeError("Managed account creation returned no parseable ownership SID")
+    return _sid_literal(sid)
+
+
+def principal_sid(admin, password, name):
+    result = base.sql(admin, password, f"""
+SET NOCOUNT ON;
+SELECT CONVERT(varchar(max),sid,1)
+FROM sys.server_principals WHERE name={base.literal(name)} AND type='S' AND principal_id<>1;
+""")
+    sids = [line.strip() for line in result.stdout.splitlines() if line.strip().startswith("0x")]
+    if len(sids) != 1:
+        raise RuntimeError("Expected exactly one SQL Login SID for disposable verifier principal")
+    return _sid_literal(sids[0])
+
+
+def delete_query(name, expected_sid):
+    sid = _sid_literal(expected_sid)
+    return (
+        f"DECLARE @n nvarchar(max)={value(name)}; "
+        f"EXEC dbo.sp_XoaTaiKhoan @LoginName=@n,@ExpectedSid={sid};"
+    )
+
+
+def status_query(name, disabled, expected_sid):
+    sid = _sid_literal(expected_sid)
     return (
         f"DECLARE @n nvarchar(max)={value(name)}; "
         f"EXEC dbo.sp_KhoaMoTaiKhoan @LoginName=@n,@Disable={1 if disabled else 0},@ExpectedSid={sid};"
@@ -218,8 +261,8 @@ IF @@ROWCOUNT<>1 THROW 52110, 'A valid existing class is required for the dispos
         yield masv
     finally:
         base.sql(admin, password, f"""
-IF DATABASE_PRINCIPAL_ID({base.literal(masv)}) IS NOT NULL DROP USER {base.identifier(masv)};
-IF SUSER_ID({base.literal(masv)}) IS NOT NULL DROP LOGIN {base.identifier(masv)};
+IF SUSER_ID({base.literal(masv)}) IS NOT NULL OR DATABASE_PRINCIPAL_ID({base.literal(masv)}) IS NOT NULL
+    THROW 52110, 'Disposable Student principal remains; resolve with the captured ExpectedSid before deleting its entity.', 1;
 DELETE dbo.Sinhvien WHERE MASV={base.literal(masv)};
 IF EXISTS(SELECT 1 FROM dbo.Sinhvien WHERE MASV={base.literal(masv)})
     THROW 52110, 'Disposable Student row cleanup failed.', 1;
@@ -321,22 +364,27 @@ def security_preflight(expected_error=None):
 def technical_role_drift(admin, password):
     security_preflight()  # Existing bootstrap and delegated Admins are valid.
     with disposable_student_row(admin, password) as masv:
-        base.sql(admin, password, create_query(masv, "QLDSV_SINHVIEN"))
+        sid = create_managed_account(admin, password, masv, "QLDSV_SINHVIEN")
         try:
-            base.sql(admin, password, f"ALTER SERVER ROLE QLDSV_ACCOUNT_ADMIN ADD MEMBER {base.identifier(masv)};")
-            security_preflight(51007)
-            base.sql("sa", None, f"""
+            try:
+                base.sql(admin, password, f"ALTER SERVER ROLE QLDSV_ACCOUNT_ADMIN ADD MEMBER {base.identifier(masv)};")
+                security_preflight(51007)
+                base.sql("sa", None, f"""
 IF NOT EXISTS(SELECT 1 FROM sys.server_role_members WHERE role_principal_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN')
               AND member_principal_id=SUSER_ID({base.literal(masv)}))
     THROW 52111, 'Preflight silently removed Student drift instead of reporting it.', 1;
 """, sa=True)
-        finally:
-            base.sql(admin, password, f"""
+            finally:
+                base.sql(admin, password, f"""
 IF EXISTS(SELECT 1 FROM sys.server_role_members WHERE role_principal_id=SUSER_ID(N'QLDSV_ACCOUNT_ADMIN')
           AND member_principal_id=SUSER_ID({base.literal(masv)}))
     ALTER SERVER ROLE QLDSV_ACCOUNT_ADMIN DROP MEMBER {base.identifier(masv)};
 """)
-        base.sql(admin, password, delete_query(masv))
+            base.sql(admin, password, delete_query(masv, sid))
+            sid = None
+        finally:
+            if sid is not None:
+                base.sql(admin, password, delete_query(masv, sid))
         absent(masv)
     unmapped = PREFIX + "_unmapped"
     absent(unmapped)
@@ -363,17 +411,60 @@ IF SUSER_ID({base.literal(unmapped)}) IS NOT NULL DROP LOGIN {base.identifier(un
     print("PASS technical-role drift: Student/unmapped members rejected (51007), not auto-repaired; legitimate delegated Admin accepted", flush=True)
 
 
+def business_role_owner_drift(admin, password):
+    """Runtime account mutations must reject a canonical role whose owner drifted from dbo."""
+    owner = PREFIX + "_role_owner"
+    with disposable_lecturer_row(admin, password) as target:
+        with disposable_lecturer_row(admin, password) as create_magv:
+            sid = create_managed_account(admin, password, target, "QLDSV_GIANGVIEN")
+            try:
+                try:
+                    base.sql(admin, password, f"""
+IF DATABASE_PRINCIPAL_ID({base.literal(owner)}) IS NOT NULL
+    THROW 52110, 'Disposable role-owner principal collision.', 1;
+CREATE USER {base.identifier(owner)} WITHOUT LOGIN;
+ALTER AUTHORIZATION ON ROLE::QLDSV_GIANGVIEN TO {base.identifier(owner)};
+""")
+                    rejected("create while business-role owner drifted", admin, password,
+                             create_query(create_magv, "QLDSV_GIANGVIEN"), 52008)
+                    rejected("delete while business-role owner drifted", admin, password,
+                             delete_query(target, sid), 52008)
+                    rejected("status while business-role owner drifted", admin, password,
+                             status_query(target, True, sid), 52008)
+                    base.sql(admin, password, f"""
+IF NOT EXISTS(SELECT 1 FROM sys.server_principals WHERE name={base.literal(target)} AND sid={sid})
+ OR NOT EXISTS(SELECT 1 FROM sys.database_principals WHERE name={base.literal(target)} AND sid={sid})
+ OR NOT EXISTS(SELECT 1 FROM sys.sql_logins WHERE name={base.literal(target)} AND is_disabled=0)
+    THROW 52114, 'Role-owner drift rejection changed the managed target.', 1;
+""")
+                finally:
+                    base.sql(admin, password, f"""
+IF DATABASE_PRINCIPAL_ID(N'QLDSV_GIANGVIEN') IS NOT NULL
+    ALTER AUTHORIZATION ON ROLE::QLDSV_GIANGVIEN TO dbo;
+IF DATABASE_PRINCIPAL_ID({base.literal(owner)}) IS NOT NULL
+    DROP USER {base.identifier(owner)};
+""")
+                base.sql(admin, password, delete_query(target, sid))
+                sid = None
+            finally:
+                if sid is not None:
+                    base.sql(admin, password, delete_query(target, sid))
+            absent(target)
+    print("PASS business-role owner drift: create/delete/status fail closed with 52008 and preserve the target", flush=True)
+
+
 def disabled_delete(admin, password):
     with disposable_lecturer_row(admin, password) as name:
         disabled_delete_account(admin, password, name)
 
 
 def disabled_delete_account(admin, password, name):
+    sid_hex = None
     try:
         child_password = "Disabled#"+secrets.token_hex(20)+"!"
-        base.sql(admin, password, create_query(name, "QLDSV_ADMIN", child_password))
-        ids = base.sql("sa", None, f"SET NOCOUNT ON; SELECT SUSER_ID({base.literal(name)}),DATABASE_PRINCIPAL_ID({base.literal(name)}),CONVERT(varchar(max),SUSER_SID({base.literal(name)}),1);", sa=True)
-        login_id_text, user_id_text, sid_hex = ids.stdout.split()
+        sid_hex = create_managed_account(admin, password, name, "QLDSV_ADMIN", child_password)
+        ids = base.sql("sa", None, f"SET NOCOUNT ON; SELECT SUSER_ID({base.literal(name)}),DATABASE_PRINCIPAL_ID({base.literal(name)});", sa=True)
+        login_id_text, user_id_text = ids.stdout.split()
         login_id, user_id = int(login_id_text), int(user_id_text)
         base.sql(admin, password, status_query(name, True, sid_hex))
         base.sql("sa", None, f"IF NOT EXISTS(SELECT 1 FROM sys.sql_logins WHERE name={base.literal(name)} AND is_disabled=1) THROW 52112,'Disposable Login was not disabled.',1;", sa=True)
@@ -384,7 +475,8 @@ def disabled_delete_account(admin, password, name):
         rejected("Admin self status change", name, child_password, status_query(name, True, sid_hex), 52018)
         rejected("stale SID status change", admin, password, status_query(name, True, "0x01"), 52016)
         base.sql(admin, password, status_query(name, True, sid_hex))
-        base.sql(admin, password, delete_query(name))
+        base.sql(admin, password, delete_query(name, sid_hex))
+        sid_hex = None
         absent(name)
         base.sql("sa", None, f"""
 IF EXISTS(SELECT 1 FROM sys.server_role_members WHERE member_principal_id={login_id})
@@ -392,7 +484,8 @@ IF EXISTS(SELECT 1 FROM sys.server_role_members WHERE member_principal_id={login
     THROW 52112, 'Disabled account deletion left orphan role memberships.', 1;
 """, sa=True)
     finally:
-        base.sql(admin, password, f"IF DATABASE_PRINCIPAL_ID({base.literal(name)}) IS NOT NULL DROP USER {base.identifier(name)}; IF SUSER_ID({base.literal(name)}) IS NOT NULL DROP LOGIN {base.identifier(name)};")
+        if sid_hex is not None:
+            base.sql(admin, password, delete_query(name, sid_hex))
     absent(name)
     print("PASS managed account lock/unlock: fresh login denied while disabled, SID mapping preserved, self/stale-SID blocked; disabled deletion still safe", flush=True)
 
@@ -444,7 +537,7 @@ IF EXISTS(SELECT 1 FROM sys.server_role_members WHERE member_principal_id={login
     print("PASS concurrency: held Sinhvien update/key lock, second Admin DELETE timed out (1222), outer rollback removed principals, disposable row cleaned", flush=True)
 
 
-def student_checks(admin, admin_password):
+def student_checks(admin, admin_password, admin_sid):
     identity(STUDENT, "123456", "QLDSV_SINHVIEN")
     expected = base.sql(admin, admin_password, f"""
 SET NOCOUNT ON;
@@ -492,7 +585,7 @@ IF (SELECT COUNT(*) FROM @m)<>{subject_count}
 """)
     rejected("Student direct Diem SELECT", STUDENT, "123456", "SELECT * FROM dbo.Diem;", 229)
     rejected("Student account creation", STUDENT, "123456", create_query(PREFIX+"_forbidden", "QLDSV_ADMIN", "Unused#123456!"), 229)
-    rejected("Student account deletion", STUDENT, "123456", delete_query(admin), 229)
+    rejected("Student account deletion", STUDENT, "123456", delete_query(admin, admin_sid), 229)
     rejected("Student supplies another MASV", STUDENT, "123456", "EXEC dbo.sp_SinhVien_XemDiem @MASV=N'SV00000001';", 8146)
     rejected("Student supplies another Login identity", STUDENT, "123456", "EXEC dbo.sp_ThongTinDangNhap @LoginName=N'SV00000001';", 8146)
     rejected("Admin invokes Student-only query", admin, admin_password, "EXEC dbo.sp_SinhVien_XemDiem;", 52022)
@@ -566,10 +659,11 @@ IF NOT EXISTS(SELECT 1 FROM sys.sql_logins WHERE name={base.literal(login)} AND 
 
 
 def active_delete(admin, password, child, child_password):
-    base.sql(admin, password, create_query(child, "QLDSV_ADMIN", child_password))
-    with held_connection(child, child_password):
-        rejected("delete of actively connected Admin", admin, password, delete_query(child), 52015)
-        base.sql("sa", None, f"""
+    sid = create_managed_account(admin, password, child, "QLDSV_ADMIN", child_password)
+    try:
+        with held_connection(child, child_password):
+            rejected("delete of actively connected Admin", admin, password, delete_query(child, sid), 52015)
+            base.sql("sa", None, f"""
 DECLARE @u int=DATABASE_PRINCIPAL_ID({base.literal(child)}), @l int=SUSER_ID({base.literal(child)});
 IF @u IS NULL OR @l IS NULL
  OR NOT EXISTS(SELECT 1 FROM sys.database_principals WHERE principal_id=@u AND sid=SUSER_SID({base.literal(child)}))
@@ -577,13 +671,17 @@ IF @u IS NULL OR @l IS NULL
  OR (SELECT COUNT(*) FROM sys.server_role_members WHERE member_principal_id=@l AND role_principal_id IN(SUSER_ID(N'QLDSV_ACCOUNT_ADMIN'),SUSER_ID(N'dbcreator')))<>2
     THROW 52104, 'Active-session deletion did not fully roll back principal/role changes.', 1;
 """, sa=True)
-    admin_capabilities(child, child_password)
-    base.sql(admin, password, delete_query(child))
+            admin_capabilities(child, child_password)
+        base.sql(admin, password, delete_query(child, sid))
+        sid = None
+    finally:
+        if sid is not None:
+            base.sql(admin, password, delete_query(child, sid))
     absent(child)
     print("PASS active-session rollback: Login/User/SID/database+server roles intact; deletion succeeds after own client closes", flush=True)
 
 
-def negative_inputs(admin, password, valid_magv):
+def negative_inputs(admin, password, valid_magv, admin_sid):
     cases = [
         ("invalid business role", PREFIX+"_invalid", "Admin", None, 52003),
         ("arbitrary server role", PREFIX+"_invalid", "sysadmin", None, 52003),
@@ -603,7 +701,7 @@ def negative_inputs(admin, password, valid_magv):
     for label, name, role, secret, error in cases:
         rejected(label, admin, password, create_query(name, role, secret), error)
     absent(PREFIX+"_invalid", PREFIX+"_weak", PREFIX+"_space ", "ZZ99999999")
-    rejected("self-delete", admin, password, delete_query(admin), 52014)
+    rejected("self-delete", admin, password, delete_query(admin, admin_sid), 52014)
 
 
 def main():
@@ -615,6 +713,7 @@ def main():
     sentinel = PREFIX+"_sentinel"
     injected = "Q'];--"+secrets.token_hex(2).upper()  # Valid 10-character MAGV containing SQL metacharacters.
     owned_student = False
+    admin_sid = student_sid = lecturer_sid = None
     # Refuse to touch a pre-existing Student account (including mismatched SID).
     absent(STUDENT, LECTURER, admin, child, failed, orphan, alias, loose, injected)
     base.build_db_init()  # Fresh deployment image, once before test mutations.
@@ -629,27 +728,30 @@ def main():
         for _ in range(2):
             base.sql(base.ADMIN, bootstrap_password, (base.ROOT/"database"/"StoredProcedures_Security.sql").read_text(encoding="utf-8"))
         print("PASS procedure DROP/CREATE rerun twice as Admin", flush=True)
-        base.sql(base.ADMIN, bootstrap_password, create_query(admin, "QLDSV_ADMIN", password))
+        admin_sid = create_managed_account(base.ADMIN, bootstrap_password, admin, "QLDSV_ADMIN", password)
         admin_capabilities(admin, password)
         print("PASS delegated Admin: CONTROL DATABASE, technical role/self-ALTER, ALTER ANY LOGIN, dbcreator; no global server control", flush=True)
         technical_role_drift(admin, password)
+        business_role_owner_drift(admin, password)
         disabled_delete(admin, password)
         student_creation_lock(admin, password)
         owned_student = True  # Also clean up an unexpected partial creation.
-        base.sql(admin, password, create_query(STUDENT, "QLDSV_SINHVIEN"))
-        student_checks(admin, password)
+        student_sid = create_managed_account(admin, password, STUDENT, "QLDSV_SINHVIEN")
+        student_checks(admin, password, admin_sid)
         with lecturer_scope_fixture(admin, password, LECTURER) as lecturer_scope:
             owned_lecturer = True
-            base.sql(admin, password, create_query(LECTURER, "QLDSV_GIANGVIEN"))
+            lecturer_sid = create_managed_account(admin, password, LECTURER, "QLDSV_GIANGVIEN")
             lecturer_checks(LECTURER, "Qldsv@123456", lecturer_scope)
-            base.sql(admin, password, delete_query(LECTURER))
+            base.sql(admin, password, delete_query(LECTURER, lecturer_sid))
+            lecturer_sid = None
             owned_lecturer = False
             absent(LECTURER)
             # Server Login is intentionally different from the existing MAGV user.
             alias_login = PREFIX + "_lecturer_login"
             absent(alias_login)
+            alias_sid = None
             try:
-                base.sql(admin, password, create_query(alias_login, "QLDSV_GIANGVIEN", database_user=LECTURER))
+                alias_sid = create_managed_account(admin, password, alias_login, "QLDSV_GIANGVIEN", database_user=LECTURER)
                 identity(alias_login, "Qldsv@123456", "QLDSV_GIANGVIEN", LECTURER)
                 base.sql("sa", None, f"""
 IF NOT EXISTS (SELECT 1 FROM sys.server_principals l
@@ -659,24 +761,20 @@ IF NOT EXISTS (SELECT 1 FROM sys.server_principals l
     THROW 52101, 'Distinct Login/DatabaseUser SID mapping missing.', 1;
 """, sa=True)
                 lecturer_checks(alias_login, "Qldsv@123456", lecturer_scope, database_user=LECTURER)
-                base.sql(admin, password, delete_query(alias_login))
+                base.sql(admin, password, delete_query(alias_login, alias_sid))
+                alias_sid = None
                 absent(alias_login, LECTURER)
             finally:
-                # Cleanup only the exact disposable Login and seed DatabaseUser.
-                base.sql(base.ADMIN, bootstrap_password, f"""
-IF DATABASE_PRINCIPAL_ID({base.literal(LECTURER)}) IS NOT NULL
- AND EXISTS(SELECT 1 FROM sys.database_principals WHERE name={base.literal(LECTURER)} AND sid=SUSER_SID({base.literal(alias_login)}))
-    DROP USER {base.identifier(LECTURER)};
-IF SUSER_ID({base.literal(alias_login)}) IS NOT NULL DROP LOGIN {base.identifier(alias_login)};
-""")
+                if alias_sid is not None:
+                    base.sql(admin, password, delete_query(alias_login, alias_sid))
             print("PASS distinct LoginName/DatabaseUser SID mapping preserves Lecturer PhanCong scope", flush=True)
         # Blank password is server-defaulted for both staff roles.
         for staff_role in ("QLDSV_ADMIN", "QLDSV_GIANGVIEN"):
-            base.sql(admin, password, create_query(child, staff_role, ""))
+            child_sid = create_managed_account(admin, password, child, staff_role, "")
             identity(child, "Qldsv@123456", staff_role)
-            base.sql(admin, password, delete_query(child))
+            base.sql(admin, password, delete_query(child, child_sid))
             absent(child)
-        negative_inputs(admin, password, failed)
+        negative_inputs(admin, password, failed, admin_sid)
         rejected("duplicate Login", admin, password, create_query(STUDENT, "QLDSV_SINHVIEN"), 52004)
         active_delete(admin, password, child, "Child#"+secrets.token_hex(20)+"!")
 
@@ -693,8 +791,9 @@ IF SUSER_ID({base.literal(alias_login)}) IS NOT NULL DROP LOGIN {base.identifier
         base.sql(base.ADMIN, bootstrap_password, f"CREATE USER {base.identifier(orphan)} WITHOUT LOGIN;")
         rejected("duplicate Database User", admin, password, create_query(orphan,"QLDSV_ADMIN",password), 52005)
         base.sql(base.ADMIN, bootstrap_password, f"CREATE LOGIN {base.identifier(loose)} WITH PASSWORD={base.literal(password)},CHECK_POLICY=ON; CREATE USER {base.identifier(alias)} FOR LOGIN {base.identifier(loose)};")
+        loose_sid = principal_sid(admin, password, loose)
         rejected("existing Login SID with differently named User", admin, password, create_query(loose,"QLDSV_ADMIN",password), 52004)
-        rejected("delete mapped User without a business role", admin, password, delete_query(loose), 52012)
+        rejected("delete mapped User without a business role", admin, password, delete_query(loose, loose_sid), 52012)
         base.sql(base.ADMIN, bootstrap_password, f"DROP USER {base.identifier(alias)}; CREATE USER {base.identifier(loose)} FOR LOGIN {base.identifier(loose)}; GRANT EXECUTE ON OBJECT::dbo.sp_ThongTinDangNhap TO {base.identifier(loose)};")
         rejected("no-role SQL identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
         nested_admin_role_guards(base.ADMIN, bootstrap_password, loose, password, failed)
@@ -703,11 +802,11 @@ IF SUSER_ID({base.literal(alias_login)}) IS NOT NULL DROP LOGIN {base.identifier
         base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_GIANGVIEN DROP MEMBER {base.identifier(loose)};")
         base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_ADMIN ADD MEMBER {base.identifier(loose)}; ALTER ROLE QLDSV_SINHVIEN ADD MEMBER {base.identifier(loose)};")
         rejected("dual-role SQL identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
-        rejected("dual-role account deletion", admin, password, delete_query(loose), 52012)
+        rejected("dual-role account deletion", admin, password, delete_query(loose, loose_sid), 52012)
         rejected("dual-role Student query", loose, password, "EXEC dbo.sp_SinhVien_XemDiem;", 52022)
         base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_GIANGVIEN ADD MEMBER {base.identifier(loose)};")
         rejected("triple-role SQL identity", loose, password, "EXEC dbo.sp_ThongTinDangNhap;", 52021)
-        rejected("triple-role account deletion", admin, password, delete_query(loose), 52012)
+        rejected("triple-role account deletion", admin, password, delete_query(loose, loose_sid), 52012)
         rejected("triple-role caller account creation", loose, password, create_query(failed,"QLDSV_ADMIN"), 229)
         # Every pair is rejected, including Lecturer+Student and Admin+Lecturer.
         base.sql(base.ADMIN, bootstrap_password, f"ALTER ROLE QLDSV_ADMIN DROP MEMBER {base.identifier(loose)};")
@@ -724,10 +823,10 @@ IF SUSER_ID({base.literal(alias_login)}) IS NOT NULL DROP LOGIN {base.identifier
         # Quoted identifier and password literals must remain data.
         base.sql(base.ADMIN, bootstrap_password, f"CREATE TABLE dbo.{base.identifier(sentinel)}(id int); INSERT dbo.{base.identifier(sentinel)} VALUES(14);")
         special_password = "Quote' ];$(unused)#"+secrets.token_hex(16)+"!"
-        base.sql(admin, password, create_query(injected,"QLDSV_ADMIN",special_password))
+        injected_sid = create_managed_account(admin, password, injected, "QLDSV_ADMIN", special_password)
         admin_capabilities(injected,special_password)
         base.sql(base.ADMIN, bootstrap_password, f"IF (SELECT COUNT(*) FROM dbo.{base.identifier(sentinel)} WHERE id=14)<>1 THROW 52105,'Identifier injection changed the sentinel.',1;")
-        base.sql(admin,password,delete_query(injected))
+        base.sql(admin,password,delete_query(injected, injected_sid))
         absent(injected)
         print("PASS identifier/password injection attempts remain quoted data; sentinel unchanged", flush=True)
 
@@ -744,10 +843,12 @@ IF SUSER_ID({base.literal(alias_login)}) IS NOT NULL DROP LOGIN {base.identifier
         if base.sql(STUDENT,"123456","SELECT 1;",expect_success=False).returncode==0:
             raise RuntimeError("db-init reset the changed Student password")
         print("PASS normal Docker hook, object grants reapplied, Admin/changed Student passwords preserved", flush=True)
-        base.sql(admin,password,delete_query(STUDENT))
+        base.sql(admin,password,delete_query(STUDENT, student_sid))
+        student_sid = None
         owned_student=False
         absent(STUDENT)
-        base.sql(base.ADMIN,bootstrap_password,delete_query(admin))
+        base.sql(base.ADMIN,bootstrap_password,delete_query(admin, admin_sid))
+        admin_sid = None
         absent(admin)
     finally:
         # Cleanup targets were verified absent at entry; never drop an account

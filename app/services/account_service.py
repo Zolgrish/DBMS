@@ -25,7 +25,7 @@ class AccountService:
         52005: "Database User hoặc SID đã tồn tại; cần kiểm tra mapping SQL Login/User.",
         52006: "Mật khẩu không hợp lệ. Admin/GiangVien dùng mật khẩu mặc định khi để trống hoặc mật khẩu theo CHECK_POLICY; sinh viên dùng mặc định do SQL Server cấp.",
         52007: "Không tìm thấy MASV hợp lệ gồm 10 ký tự trong danh sách sinh viên.",
-        52008: "Thiếu database role bắt buộc. Hãy kiểm tra cấu hình bảo mật SQL Server.",
+        52008: "Database role bắt buộc đang thiếu hoặc sai cấu hình. Hãy kiểm tra Security.sql và quyền sở hữu role.",
         52009: "Không thể tạo tài khoản. Kiểm tra chính sách mật khẩu Admin/GiangVien và quyền tạo SQL Login/User.",
         52010: "Tài khoản SQL không tồn tại.",
         52011: "SQL Login/User có mapping không hợp lệ. Hãy kiểm tra trước khi xóa.",
@@ -34,7 +34,7 @@ class AccountService:
         52014: "Không thể xóa tài khoản đang đăng nhập.",
         52015: "Không thể xóa tài khoản. Nếu có phiên SQL đang hoạt động, hãy đăng xuất trước khi xóa; "
                "nếu vẫn lỗi, kiểm tra quyền sở hữu và quyền xóa tài khoản.",
-        52016: "Danh tính SQL của tài khoản đã thay đổi; thao tác xóa bị từ chối.",
+        52016: "Danh tính SQL của tài khoản đã thay đổi hoặc không còn khớp danh sách hiện tại; hãy tải lại danh sách rồi thử lại.",
         52017: "Không tìm thấy MAGV hợp lệ gồm 10 ký tự trong danh sách giảng viên.",
         52018: "Không thể khóa hoặc mở khóa chính tài khoản đang đăng nhập.",
         52019: "Không thể thay đổi trạng thái tài khoản SQL. Hãy tải lại danh sách và thử lại.",
@@ -104,14 +104,15 @@ class AccountService:
             raise AccountServiceError("Tài khoản giảng viên chỉ hỗ trợ Admin hoặc GiangVien.")
         return self.create_account(role=role, password=password, magv=magv)
 
-    def delete_account(self, login_name: str) -> None:
+    def delete_account(self, login_name: str, expected_sid: bytes | None) -> None:
         require_admin()
         login_name = login_name.strip()
         self._validate_login_name(login_name)
         if login_name.casefold() == session.current_user.get("login_name", session.current_user["username"]).casefold():
             raise AccountServiceError(self.SQL_ERRORS[52014])
+        self._validate_expected_sid(expected_sid)
         try:
-            self._accounts.delete_account(login_name)
+            self._accounts.delete_account(login_name, expected_sid)
         except session.SessionRequiredError:
             self._raise_session_error()
         except pyodbc.Error as error:
@@ -121,7 +122,7 @@ class AccountService:
         self,
         login_name: str,
         active: bool,
-        expected_sid: bytes | None = None,
+        expected_sid: bytes | None,
     ) -> None:
         require_admin()
         login_name = login_name.strip()
@@ -129,6 +130,7 @@ class AccountService:
         current_login = session.current_user.get("login_name", session.current_user["username"])
         if login_name.casefold() == current_login.casefold():
             raise AccountServiceError(self.SQL_ERRORS[52018])
+        self._validate_expected_sid(expected_sid)
         try:
             self._accounts.set_account_disabled(login_name, not bool(active), expected_sid)
         except session.SessionRequiredError:
@@ -142,6 +144,11 @@ class AccountService:
             raise AccountServiceError("Tên đăng nhập không được để trống.")
         if len(login_name.encode("utf-16-le")) > 256:
             raise AccountServiceError("Tên đăng nhập không được vượt quá 128 đơn vị UTF-16.")
+
+    @classmethod
+    def _validate_expected_sid(cls, expected_sid: bytes | None) -> None:
+        if not isinstance(expected_sid, bytes) or not expected_sid:
+            raise AccountServiceError(cls.SQL_ERRORS[52016])
 
     @staticmethod
     def _raise_session_error() -> None:

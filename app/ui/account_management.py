@@ -331,7 +331,7 @@ class AccountManagementDialog(QDialog):
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
-            self._service.delete_account(account.login_name or account.username)
+            self._service.delete_account(account.login_name or account.username, account.principal_sid)
         except (AccountServiceError, PermissionError) as error:
             QMessageBox.warning(self, "Không thể xóa tài khoản", str(error))
             return

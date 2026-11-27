@@ -127,7 +127,7 @@ class AccountRepository:
             ).fetchone()
             return row[0]
 
-    def delete_account(self, login_name: str, expected_sid: bytes | None = None) -> None:
+    def delete_account(self, login_name: str, expected_sid: bytes) -> None:
         with session.qldsv_cursor() as cursor:
             cursor.execute("EXEC dbo.sp_XoaTaiKhoan @LoginName=?, @ExpectedSid=?;", login_name, expected_sid)
 
@@ -135,7 +135,7 @@ class AccountRepository:
         self,
         login_name: str,
         disabled: bool,
-        expected_sid: bytes | None = None,
+        expected_sid: bytes,
     ) -> None:
         with session.qldsv_cursor() as cursor:
             cursor.execute(

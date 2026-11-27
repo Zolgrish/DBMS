@@ -31,6 +31,7 @@ class FakeAccountRepository:
                 "GV00000001",
                 True,
                 login_name="admin-login",
+                principal_sid=b"admin-sid",
             ),
             User(
                 "SV00000003",
@@ -39,6 +40,7 @@ class FakeAccountRepository:
                 None,
                 True,
                 login_name="student-login-03",
+                principal_sid=b"student-sid-03",
             ),
         ]
         self.calls: list[tuple] = []
@@ -77,14 +79,16 @@ class FakeAccountRepository:
                 None if student else database_user,
                 True,
                 login_name=login_name,
+                principal_sid=b"fake-sid",
             )
         )
         return b"fake-sid"
 
-    def delete_account(self, login_name: str) -> None:
-        self.calls.append(("delete_account", login_name))
+    def delete_account(self, login_name: str, expected_sid: bytes) -> None:
+        self.calls.append(("delete_account", login_name, expected_sid))
         self.accounts = [
-            account for account in self.accounts if account.login_name != login_name
+            account for account in self.accounts
+            if not (account.login_name == login_name and account.principal_sid == expected_sid)
         ]
 
 
@@ -106,7 +110,7 @@ class Epic14PermissionsTests(unittest.TestCase):
             ("list", lambda: self.service.find_all_accounts()),
             ("create", lambda: self.service.create_account("Admin", "pw", magv="GV00000002")),
             ("auto-create", lambda: self.service.create_student_account("SV00000004")),
-            ("delete", lambda: self.service.delete_account("other")),
+            ("delete", lambda: self.service.delete_account("other", b"other-sid")),
         )
         for identity in (
             None,
@@ -156,7 +160,7 @@ class Epic14PermissionsTests(unittest.TestCase):
             login_name="admin-login-02",
         )
         self.service.create_student_account("SV00000004")
-        self.service.delete_account("student-login-03")
+        self.service.delete_account("student-login-03", b"student-sid-03")
 
         self.assertIn(
             (
@@ -178,7 +182,7 @@ class Epic14PermissionsTests(unittest.TestCase):
             ),
             self.repository.calls,
         )
-        self.assertIn(("delete_account", "student-login-03"), self.repository.calls)
+        self.assertIn(("delete_account", "student-login-03", b"student-sid-03"), self.repository.calls)
         self.assertFalse(any(a.username == "SV00000003" for a in self.repository.accounts))
 
     def test_admin_menu_opens_account_list_and_refreshes_after_delete(self) -> None:

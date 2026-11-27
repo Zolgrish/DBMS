@@ -55,8 +55,37 @@ def denied(operation, number):
         raise RuntimeError(f"Expected SQL rejection {number}, but operation succeeded")
 
 
-def delete(connection, name):
-    query(connection, "EXEC dbo.sp_XoaTaiKhoan @LoginName=?;", name)
+def create(connection, name, database_user, role, password=None):
+    rows = query(
+        connection,
+        """
+DECLARE @CreatedSid varbinary(85);
+EXEC dbo.sp_TaoTaiKhoan
+    @LoginName=?,
+    @DatabaseUser=?,
+    @Role=?,
+    @Password=?,
+    @CreatedSid=@CreatedSid OUTPUT;
+SELECT @CreatedSid;
+""",
+        name,
+        database_user,
+        role,
+        password,
+    )
+    check(rows and rows[0][0] is not None, "Account creation did not return an ownership SID")
+    sid = bytes(rows[0][0])
+    check(bool(sid), "Account creation returned an empty ownership SID")
+    return sid
+
+
+def delete(connection, name, expected_sid):
+    query(
+        connection,
+        "EXEC dbo.sp_XoaTaiKhoan @LoginName=?, @ExpectedSid=?;",
+        name,
+        expected_sid,
+    )
 
 
 def assert_absent(connection, name, database_user=None):
@@ -112,9 +141,14 @@ def main():
         check(query(control, "SELECT OBJECT_ID(N'dbo.TaiKhoan',N'U');")[0][0] is None, "TaiKhoan unexpectedly exists")
         print("PASS bootstrap Admin: application login, identity SP, repository QLDSV and master principals")
 
-        query(control, "EXEC dbo.sp_TaoTaiKhoan @LoginName=?, @DatabaseUser=?, @Role=?, @Password=?;",
-              temporary_admin_login, temporary_admin, "QLDSV_ADMIN", temporary_password)
-        created.append((temporary_admin_login, temporary_admin))
+        temporary_admin_sid = create(
+            control,
+            temporary_admin_login,
+            temporary_admin,
+            "QLDSV_ADMIN",
+            temporary_password,
+        )
+        created.append((temporary_admin_login, temporary_admin, temporary_admin_sid))
         user = AuthService().login(temporary_admin_login, temporary_password)
         check(user.magv == temporary_admin and user.masv is None, "Admin MAGV mismatch")
         temporary_password = ""
@@ -122,16 +156,16 @@ def main():
         check(AccountRepository().student_exists(STUDENT), "Admin repository read failed")
         # Proves pooling is disabled: either owned physical connection prevents
         # DROP LOGIN; after logout both must be gone for DROP to succeed.
-        denied(lambda: delete(control, temporary_admin_login), 52015)
+        denied(lambda: delete(control, temporary_admin_login, temporary_admin_sid), 52015)
         session.clear_session()
-        delete(control, temporary_admin_login)
-        created.remove((temporary_admin_login, temporary_admin))
+        delete(control, temporary_admin_login, temporary_admin_sid)
+        created.remove((temporary_admin_login, temporary_admin, temporary_admin_sid))
         assert_absent(control, temporary_admin_login, temporary_admin)
         assert_absent(control, LECTURER)
         print("PASS delegated Admin: app login and logout physically close QLDSV + master sessions")
 
-        query(control, "EXEC dbo.sp_TaoTaiKhoan @LoginName=?, @DatabaseUser=?, @Role=?;", lecturer_login, LECTURER, "QLDSV_GIANGVIEN")
-        created.append((lecturer_login, LECTURER))
+        lecturer_sid = create(control, lecturer_login, LECTURER, "QLDSV_GIANGVIEN")
+        created.append((lecturer_login, LECTURER, lecturer_sid))
         user = AuthService().login(lecturer_login, "Qldsv@123456")
         assert_session_identity(lecturer_login, "GiangVien", LECTURER)
         check(user.magv == LECTURER and user.masv is None, "Lecturer trusted MAGV mismatch")
@@ -143,7 +177,7 @@ def main():
             raise RuntimeError("Lecturer unexpectedly owns master")
         for operation in (AccountService().find_all_accounts,
                           lambda: AccountService().create_lecturer_account(LECTURER),
-                          lambda: AccountService().delete_account(LECTURER)):
+                          lambda: AccountService().delete_account(LECTURER, lecturer_sid)):
             try:
                 operation()
             except PermissionError:
@@ -151,16 +185,16 @@ def main():
             else:
                 raise RuntimeError("Lecturer gained account-management access")
         denied(AccountRepository().find_all_accounts, 52001)
-        denied(lambda: delete(control, lecturer_login), 52015)
+        denied(lambda: delete(control, lecturer_login, lecturer_sid), 52015)
         session.clear_session()
         session.clear_session()
-        delete(control, lecturer_login)
-        created.remove((lecturer_login, LECTURER))
+        delete(control, lecturer_login, lecturer_sid)
+        created.remove((lecturer_login, LECTURER, lecturer_sid))
         assert_absent(control, lecturer_login, LECTURER)
         print("PASS Lecturer: MAGV, SQL identity, no master/account access, physical logout")
 
-        query(control, "EXEC dbo.sp_TaoTaiKhoan @LoginName=?, @DatabaseUser=?, @Role=?;", STUDENT, STUDENT, "QLDSV_SINHVIEN")
-        created.append((STUDENT, STUDENT))
+        student_sid = create(control, STUDENT, STUDENT, "QLDSV_SINHVIEN")
+        created.append((STUDENT, STUDENT, student_sid))
         user = AuthService().login(STUDENT, "123456")
         assert_session_identity(STUDENT, "SinhVien")
         check(user.masv == STUDENT, "Student trusted MASV mismatch")
@@ -198,11 +232,11 @@ SELECT ISNULL(IS_SRVROLEMEMBER(N'QLDSV_ACCOUNT_ADMIN'),-1),
             denied(lambda sql=sql: student_sql(sql), 229)
         denied(lambda: AccountRepository().student_exists(STUDENT), 229)
         denied(lambda: student_sql("EXEC dbo.sp_TaoTaiKhoan @LoginName=NULL,@Role=NULL;"), 229)
-        denied(lambda: student_sql("EXEC dbo.sp_XoaTaiKhoan @LoginName=NULL;"), 229)
-        denied(lambda: delete(control, STUDENT), 52015)
+        denied(lambda: student_sql("EXEC dbo.sp_XoaTaiKhoan @LoginName=NULL,@ExpectedSid=0x01;"), 229)
+        denied(lambda: delete(control, STUDENT, student_sid), 52015)
         session.clear_session()
-        delete(control, STUDENT)
-        created.remove((STUDENT, STUDENT))
+        delete(control, STUDENT, student_sid)
+        created.remove((STUDENT, STUDENT, student_sid))
         assert_absent(control, STUDENT)
         print("PASS Student: app principal/MASV, self scores, direct SELECT/DML denied, physical logout")
         check(query(control, "SELECT OBJECT_ID(N'dbo.TaiKhoan',N'U');")[0][0] is None,
@@ -211,13 +245,19 @@ SELECT ISNULL(IS_SRVROLEMEMBER(N'QLDSV_ACCOUNT_ADMIN'),-1),
     finally:
         current_password = temporary_password = ""
         session.clear_session()
+        cleanup_failed = False
         try:
             if control is not None:
-                for name, database_user in reversed(created):
-                    delete(control, name)
-                    assert_absent(control, name, database_user)
+                for name, database_user, sid in reversed(created):
+                    try:
+                        delete(control, name, sid)
+                        assert_absent(control, name, database_user)
+                    except Exception:
+                        cleanup_failed = True
         finally:
             session.close_connection(control)
+        if cleanup_failed:
+            raise RuntimeError("Disposable-principal cleanup incomplete; inspect verifier principals") from None
 
 
 if __name__ == "__main__":

@@ -145,18 +145,10 @@ class AccountTests(unittest.TestCase):
     def test_repository_delete_uses_only_parameterized_security_procedure(self):
         connection = Connection()
         session.set_authenticated(ADMIN, connection)
-        for expected_sid in (None, b"owned"):
-            with self.subTest(expected_sid=expected_sid):
-                AccountRepository().delete_account("target", expected_sid=expected_sid)
-                self.assertEqual(connection.statement.calls[-1], (
-                    "EXEC dbo.sp_XoaTaiKhoan @LoginName=?, @ExpectedSid=?;", ("target", expected_sid),
-                ))
-
-    def test_default_repository_delete_sends_null_expected_sid(self):
-        connection = Connection()
-        session.set_authenticated(ADMIN, connection)
-        AccountRepository().delete_account("target")
-        self.assertEqual(connection.statement.calls[0][1], ("target", None))
+        AccountRepository().delete_account("target", expected_sid=b"owned")
+        self.assertEqual(connection.statement.calls[-1], (
+            "EXEC dbo.sp_XoaTaiKhoan @LoginName=?, @ExpectedSid=?;", ("target", b"owned"),
+        ))
 
     def test_repository_status_change_uses_parameterized_security_procedure(self):
         connection = Connection()
@@ -235,19 +227,32 @@ class AccountTests(unittest.TestCase):
                 self.assertNotIn("sensitive-driver-detail", str(caught.exception))
 
     def test_delete_calls_repository_and_self_delete_never_reaches_it(self):
-        self.service.delete_account("target")
-        self.repository.delete_account.assert_called_once_with("target")
+        self.service.delete_account("target", b"expected")
+        self.repository.delete_account.assert_called_once_with("target", b"expected")
         self.repository.reset_mock()
         with self.assertRaisesRegex(AccountServiceError, "đang đăng nhập"):
-            self.service.delete_account("ADMIN")
+            self.service.delete_account("ADMIN", b"admin-sid")
         self.repository.delete_account.assert_not_called()
+
+    def test_delete_and_status_require_nonempty_expected_sid_before_repository_access(self):
+        for operation in (
+            lambda sid: self.service.delete_account("target", sid),
+            lambda sid: self.service.set_account_active("target", False, sid),
+        ):
+            for sid in (None, b""):
+                with self.subTest(operation=operation, sid=sid):
+                    self.repository.reset_mock()
+                    with self.assertRaisesRegex(AccountServiceError, "thay đổi"):
+                        operation(sid)
+                    self.repository.delete_account.assert_not_called()
+                    self.repository.set_account_disabled.assert_not_called()
 
     def test_status_change_calls_repository_and_rejects_self(self):
         self.service.set_account_active("target", False, b"expected")
         self.repository.set_account_disabled.assert_called_once_with("target", True, b"expected")
         self.repository.reset_mock()
         with self.assertRaisesRegex(AccountServiceError, "đang đăng nhập"):
-            self.service.set_account_active("ADMIN", False)
+            self.service.set_account_active("ADMIN", False, b"admin-sid")
         self.repository.set_account_disabled.assert_not_called()
 
     def test_delete_sql_errors_include_active_session_and_missing_target(self):
@@ -256,7 +261,7 @@ class AccountTests(unittest.TestCase):
             with self.subTest(number=number):
                 self.repository.delete_account.side_effect = pyodbc.Error("42000", f"private ({number})")
                 with self.assertRaisesRegex(AccountServiceError, text) as caught:
-                    self.service.delete_account("target")
+                    self.service.delete_account("target", b"expected")
                 self.assertNotIn("private", str(caught.exception))
 
     def test_status_sql_errors_are_safe_and_specific(self):
@@ -277,7 +282,7 @@ class AccountTests(unittest.TestCase):
 
     def test_blank_delete_name_is_rejected_before_repository_access(self):
         with self.assertRaises(AccountServiceError):
-            self.service.delete_account("  ")
+            self.service.delete_account("  ", b"expected")
         self.repository.delete_account.assert_not_called()
 
     def test_session_required_error_is_translated_without_any_connection_attempt(self):
@@ -292,8 +297,8 @@ class AccountTests(unittest.TestCase):
                      User("GV00000002", "GiangVien", None, "GV00000002", True)):
             session.set_authenticated(user, None) if user else session.clear_session()
             for method, args in (("find_all_accounts", ()), ("create_account", ("Admin", "pw", "", "GV00000002")),
-                                 ("create_student_account", ("SV00000002",)), ("delete_account", ("target",)),
-                                 ("set_account_active", ("target", False))):
+                                 ("create_student_account", ("SV00000002",)), ("delete_account", ("target", b"expected")),
+                                 ("set_account_active", ("target", False, b"expected"))):
                 with self.subTest(user=user, method=method):
                     with self.assertRaises(PermissionError):
                         getattr(self.service, method)(*args)
@@ -301,8 +306,8 @@ class AccountTests(unittest.TestCase):
 
     def test_connection_loss_invalidates_every_account_operation_without_reconnect(self):
         for method, args in (("find_all_accounts", ()), ("create_account", ("Admin", "pw", "", "GV00000002")),
-                             ("create_student_account", ("SV00000002",)), ("delete_account", ("target",)),
-                             ("set_account_active", ("target", False)),
+                             ("create_student_account", ("SV00000002",)), ("delete_account", ("target", b"expected")),
+                             ("set_account_active", ("target", False, b"expected")),
                              ("create_account", ("GiangVien", "pw", "", "GV00000001"))):
             with self.subTest(method=method, username=args[0] if args else ""):
                 qldsv, master = Connection(error=pyodbc.Error("08S01", "lost")), Connection()
@@ -318,8 +323,8 @@ class AccountTests(unittest.TestCase):
         for method, args, repository_method in (
             ("find_all_accounts", (), "find_all_accounts"),
             ("create_account", ("Admin", "pw", "", "GV00000002"), "create_account"),
-            ("delete_account", ("target",), "delete_account"),
-            ("set_account_active", ("target", False), "set_account_disabled"),
+            ("delete_account", ("target", b"expected"), "delete_account"),
+            ("set_account_active", ("target", False, b"expected"), "set_account_disabled"),
             ("create_account", ("GiangVien", "pw", "", "GV00000001"), "create_account"),
         ):
             with self.subTest(method=method):
@@ -377,7 +382,9 @@ class AccountTests(unittest.TestCase):
                         "staff-login", password or None, AccountService.SQL_ROLES[role], "GV00000002")
 
     def _dialog(self):
-        self.repository.find_all_accounts.return_value = [User("other", "Admin", None, None, True)]
+        self.repository.find_all_accounts.return_value = [
+            User("other", "Admin", None, None, True, principal_sid=b"other-sid")
+        ]
         dialog = AccountManagementDialog(self.service)
         self.addCleanup(dialog.close)
         dialog.account_table.selectRow(0)
@@ -408,7 +415,7 @@ class AccountTests(unittest.TestCase):
 
     def test_table_shows_distinct_login_and_business_identity_and_deletes_login(self):
         self.repository.find_all_accounts.return_value = [
-            User("GV00000002", "GiangVien", None, "GV00000002", True, "Le Lan", login_name="staff-login")
+            User("GV00000002", "GiangVien", None, "GV00000002", True, "Le Lan", login_name="staff-login", principal_sid=b"staff-sid")
         ]
         dialog = AccountManagementDialog(self.service)
         self.addCleanup(dialog.close)
@@ -417,7 +424,7 @@ class AccountTests(unittest.TestCase):
         dialog.account_table.selectRow(0)
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
             dialog.delete_button.click()
-        self.repository.delete_account.assert_called_once_with("staff-login")
+        self.repository.delete_account.assert_called_once_with("staff-login", b"staff-sid")
 
     def test_delete_confirmation_cancel_does_not_call_service(self):
         dialog = self._dialog()
@@ -427,12 +434,26 @@ class AccountTests(unittest.TestCase):
         self.repository.delete_account.assert_not_called()
         self.assertEqual(self.repository.find_all_accounts.call_count, 1)
 
+    def test_ui_never_falls_back_to_login_name_when_visible_sid_is_missing(self):
+        self.repository.find_all_accounts.return_value = [
+            User("other", "Admin", None, None, True, principal_sid=None)
+        ]
+        dialog = AccountManagementDialog(self.service)
+        self.addCleanup(dialog.close)
+        dialog.account_table.selectRow(0)
+        with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
+            with patch.object(QMessageBox, "warning") as warning:
+                dialog.delete_button.click()
+        self.repository.delete_account.assert_not_called()
+        self.assertIn("tải lại danh sách", warning.call_args.args[2])
+        self.assertEqual(dialog.account_table.rowCount(), 1)
+
     def test_confirmed_delete_calls_service_then_reloads_empty_list(self):
         dialog = self._dialog()
         self.repository.find_all_accounts.return_value = []
         with patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.Yes):
             dialog.delete_button.click()
-        self.repository.delete_account.assert_called_once_with("other")
+        self.repository.delete_account.assert_called_once_with("other", b"other-sid")
         self.assertEqual(self.repository.find_all_accounts.call_count, 2)
         self.assertEqual(dialog.account_table.rowCount(), 0)
 
@@ -699,11 +720,12 @@ class VerifierSafetyTests(unittest.TestCase):
             role = "Admin"
             return control if kwargs.get("cleanup_connection") else None
 
-        def delete_account(name):
+        def delete_account(name, expected_sid):
             require_admin()
             if name == "admin":
                 raise AccountServiceError(AccountService.SQL_ERRORS[52014])
             if name == staff_login:
+                self.assertEqual(expected_sid, b"admin-owned")
                 raise AccountServiceError(AccountService.SQL_ERRORS[52015])
 
         service.find_all_accounts.side_effect = list_accounts
@@ -785,6 +807,10 @@ class SqlOwnershipContractTests(unittest.TestCase):
                 self.assertIn(token, guard)
         self.assertIn("(N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN')", self.delete)
         self.assertIn("@BusinessRole<>N'QLDSV_ADMIN'", self.delete)
+        for body in (self.create, self.delete, self.status):
+            self.assertIn("is_fixed_role=0", body)
+            self.assertIn("owning_principal_id=DATABASE_PRINCIPAL_ID(N'dbo')", body)
+            self.assertRegex(body, r"COUNT\(\*\)\s+FROM sys\.database_principals")
 
     def test_status_change_preserves_sid_user_and_role_and_blocks_self(self):
         body = self.status
@@ -793,7 +819,7 @@ class SqlOwnershipContractTests(unittest.TestCase):
         self.assertIn("THROW 52018", body)
         self.assertIn("ALTER LOGIN '+QUOTENAME(@Name)+CASE WHEN @Disable=1 THEN N' DISABLE;' ELSE N' ENABLE;' END", body)
         self.assertIn("SUSER_SID(@Name)<>@Sid", body)
-        self.assertIn("@ExpectedSid IS NOT NULL AND @Sid<>@ExpectedSid", body_only)
+        self.assertIn("@ExpectedSid IS NULL OR DATALENGTH(@ExpectedSid)=0 OR @Sid<>@ExpectedSid", body_only)
         self.assertIn("principal_id=@UserId AND name=@UserName AND sid=@Sid", body)
         self.assertNotIn("DROP USER", body)
         self.assertNotIn("ALTER ROLE ", body)
@@ -894,14 +920,28 @@ class SqlOwnershipContractTests(unittest.TestCase):
         self.assertRegex(catch[:catch.index("THROW")], r"SET\s+@CreatedSid\s*=\s*NULL")
         self.assertIn("ROLLBACK TRANSACTION", catch)
 
-    def test_delete_optional_guard_precedes_mutations_and_preserves_missing_error(self):
+    def test_delete_requires_expected_sid_after_target_lookup_and_before_mutations(self):
         header, body = re.split(r"\bAS\b", self.delete, maxsplit=1)
         self.assertRegex(header, r"@ExpectedSid\s+varbinary\(85\)\s*=\s*NULL")
-        guard = re.search(r"IF\s+@ExpectedSid\s+IS\s+NOT\s+NULL\s+AND\s+@Sid\s*<>\s*@ExpectedSid\s+THROW\s+52016", body)
+        guard = re.search(r"IF\s+@ExpectedSid\s+IS\s+NULL\s+OR\s+DATALENGTH\(@ExpectedSid\)=0\s+OR\s+@Sid\s*<>\s*@ExpectedSid\s+THROW\s+52016", body)
         self.assertIsNotNone(guard)
         self.assertGreater(guard.start(), body.index("BEGIN TRANSACTION"))
         self.assertGreater(guard.start(), body.index("THROW 52010"))
         self.assertLess(guard.start(), body.index("DROP MEMBER"))
+
+    def test_account_mutations_validate_canonical_business_roles_owned_by_dbo(self):
+        for body in (self.create, self.delete, self.status):
+            self.assertRegex(
+                body,
+                r"(?s)name IN \(N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'\).*?"
+                r"type='R'.*?is_fixed_role=0.*?owning_principal_id=DATABASE_PRINCIPAL_ID\(N'dbo'\).*?THROW 52008",
+            )
+        for body in (self.delete, self.status):
+            self.assertRegex(
+                body,
+                r"(?s)member_principal_id=@UserId.*?r\.name IN \(N'QLDSV_ADMIN',N'QLDSV_GIANGVIEN',N'QLDSV_SINHVIEN'\).*?"
+                r"r\.type='R'.*?r\.is_fixed_role=0.*?r\.owning_principal_id=DATABASE_PRINCIPAL_ID\(N'dbo'\)",
+            )
 
     def test_delete_rechecks_sid_in_drop_batch_and_rethrows_52016_after_rollback(self):
         _, body = re.split(r"\bAS\b", self.delete, maxsplit=1)
@@ -916,6 +956,32 @@ class SqlOwnershipContractTests(unittest.TestCase):
         catch = body.split("BEGIN CATCH", 1)[1]
         self.assertLess(catch.index("ROLLBACK TRANSACTION"), catch.index("IF @Error BETWEEN 52000 AND 52099 THROW"))
         self.assertLess(catch.index("IF @Error BETWEEN 52000 AND 52099 THROW"), catch.index("THROW 52015"))
+
+
+class SecurityProcedureVerifierContractTests(unittest.TestCase):
+    def test_create_managed_account_declares_exec_variables_before_call(self):
+        path = Path(__file__).resolve().parents[1] / "docker" / "verify-security-procedures.py"
+        spec = importlib.util.spec_from_file_location("verify_security_procedures_contract", path)
+        verifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(verifier)
+        result = Mock(stdout="0x01\n")
+
+        with patch.object(verifier.base, "sql", return_value=result) as sql:
+            sid = verifier.create_managed_account(
+                "admin-login",
+                "secret",
+                "target-login",
+                "QLDSV_GIANGVIEN",
+                database_user="GV00000004",
+            )
+
+        query = sql.call_args.args[2]
+        self.assertEqual(sid, "0x01")
+        self.assertIn("DECLARE @n nvarchar(max)=CONVERT", query)
+        self.assertIn("@u nvarchar(max)=CONVERT", query)
+        self.assertIn("@r nvarchar(max)=CONVERT", query)
+        self.assertIn("EXEC dbo.sp_TaoTaiKhoan @LoginName=@n,@DatabaseUser=@u", query)
+        self.assertNotIn("@LoginName=CONVERT", query)
 
 
 if __name__ == "__main__":
