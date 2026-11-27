@@ -336,7 +336,7 @@ class Epic15Tests(unittest.TestCase):
             ("create_account", ("SinhVien", None, "SV00000002")),
             ("create_student_account", ("SV00000002",)),
             ("create_account", ("GiangVien", "pw", "", "GV00000001")),
-            ("delete_account", ("other",)),
+            ("delete_account", ("other", b"other-sid")),
         )
         for method, args in cases:
             with self.subTest(method=method, args=args):
@@ -354,7 +354,7 @@ class Epic15Tests(unittest.TestCase):
         cases = (
             ("find_all_accounts", (), "find_all_accounts"),
             ("create_account", ("Admin", "pw", "", "GV00000002"), "create_account"),
-            ("delete_account", ("other",), "delete_account"),
+            ("delete_account", ("other", b"other-sid"), "delete_account"),
             ("create_account", ("GiangVien", "pw", "", "GV00000001"), "create_account"),
         )
         for method, args, repository_method in cases:

@@ -129,7 +129,11 @@ def main():
         control = login_admin(admin, cleanup_connection=True)
         service = AccountService()
         accounts = service.find_all_accounts()
-        check(any(a.username == admin_user and a.login_name == admin and a.role == "Admin" for a in accounts), "Current Admin missing from list")
+        admin_account = next(
+            (a for a in accounts if a.username == admin_user and a.login_name == admin and a.role == "Admin"),
+            None,
+        )
+        check(admin_account is not None, "Current Admin missing from list")
         check(any(a.username == demo_user and a.login_name == demo and a.role == "SinhVien" for a in accounts), "Demo Student missing from list")
         check(query(control, "SELECT OBJECT_ID(N'dbo.TaiKhoan',N'U');")[0][0] is None,
               "Run this verifier against the target database without the legacy account table")
@@ -141,8 +145,13 @@ def main():
         assert_absent(control, lecturer_login, lecturer)
         for magv in (temporary_admin, lecturer):
             check(AccountRepository().lecturer_exists(magv), "Disposable MAGV business row does not exist")
-        expect_service_error(lambda: service.delete_account(admin), 52014)
-        expect_sql_error(lambda: AccountRepository().delete_account(admin), 52014)
+        self_delete_sid = (
+            admin_account.principal_sid
+            if isinstance(admin_account.principal_sid, bytes) and admin_account.principal_sid
+            else b"\x01"
+        )
+        expect_service_error(lambda: service.delete_account(admin, self_delete_sid), 52014)
+        expect_sql_error(lambda: AccountRepository().delete_account(admin, self_delete_sid), 52014)
         print("PASS Admin app login, SQL metadata list and self-delete boundaries")
 
         sid = service.create_account("Admin", temporary_password, magv=temporary_admin, login_name=temporary_admin_login)
@@ -160,7 +169,10 @@ def main():
               "ExpectedSid rejection did not preserve principal/memberships")
         active = open_sql_connection(temporary_admin_login, temporary_password)
         temporary_password = ""
-        expect_service_error(lambda: service.delete_account(temporary_admin_login), 52015)
+        expect_service_error(
+            lambda: service.delete_account(temporary_admin_login, owned[temporary_admin_login]),
+            52015,
+        )
         check(assert_managed(control, temporary_admin_login, "QLDSV_ADMIN", temporary_admin) == owned[temporary_admin_login],
               "Active-session rejection did not preserve principal/memberships")
         check(query(active, "SELECT 1;")[0][0] == 1, "Target connection was interrupted")
@@ -183,10 +195,10 @@ def main():
         check(user.role == "SinhVien" and user.masv == student, "Default Student authentication failed")
         expect_sql_error(AccountRepository().find_all_accounts, 52001)
         expect_sql_error(lambda: AccountRepository().create_account(temporary_admin, None, "QLDSV_ADMIN"), 229)
-        expect_sql_error(lambda: AccountRepository().delete_account(student), 229)
+        expect_sql_error(lambda: AccountRepository().delete_account(student, owned[student]), 229)
         for operation in (service.find_all_accounts,
                           lambda: service.create_student_account(student),
-                          lambda: service.delete_account(student)):
+                          lambda: service.delete_account(student, owned[student])):
             try:
                 operation()
             except PermissionError:
@@ -211,10 +223,10 @@ def main():
         check(user.role == "GiangVien" and user.magv == lecturer and user.masv is None, "Lecturer login mismatch")
         expect_sql_error(AccountRepository().find_all_accounts, 52001)
         expect_sql_error(lambda: AccountRepository().create_account(lecturer_login, None, "QLDSV_GIANGVIEN", lecturer), 229)
-        expect_sql_error(lambda: AccountRepository().delete_account(lecturer_login), 229)
+        expect_sql_error(lambda: AccountRepository().delete_account(lecturer_login, owned[lecturer_login]), 229)
         for operation in (service.find_all_accounts,
                           lambda: service.create_account("GiangVien", magv=lecturer),
-                          lambda: service.delete_account(lecturer_login)):
+                          lambda: service.delete_account(lecturer_login, owned[lecturer_login])):
             try:
                 operation()
             except PermissionError:
