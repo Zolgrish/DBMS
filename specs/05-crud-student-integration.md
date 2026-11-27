@@ -2,7 +2,7 @@
 
 **Owner chính:** Người 2  
 **Phối hợp Security:** Người 1  
-**Tickets:** LOP-01..08, SV-01..14, MH-01..09, GV-01..08
+**Tickets:** LOP-01..08, SV-01..14, MH-01..09, GV-01..09
 
 ## Quản lý Lớp
 
@@ -33,7 +33,7 @@ Role         = QLDSV_SINHVIEN
 
 Đây là SQL Login + Database User + role membership, không phải `INSERT dbo.TaiKhoan`.
 
-Nếu tạo account thất bại, flow phải không để hệ thống ở trạng thái khó hiểu. Cách rollback/compensation cụ thể là open design nhưng kết quả cuối phải nhất quán và có lỗi rõ cho user.
+Nếu tạo account thất bại, flow thêm SV phải rollback hoặc compensation theo cơ chế đã triển khai để không để trạng thái nửa chừng (SV đã lưu nhưng account chưa tạo, hoặc ngược lại). Kết quả cuối phải nhất quán và có lỗi rõ cho user.
 
 ### SV-14 - Xóa SV và account
 
@@ -54,7 +54,7 @@ Không để orphan SQL Login/User. Backlog ưu tiên xử lý account trước 
 
 ## Quản lý Giảng viên
 
-- **GV-01..08:** chỉ Admin được list/thêm/sửa/xóa business entity `dbo.Giangvien` qua Quản lý giảng viên. Model Lecturer tách khỏi User; service/repository mượn authenticated QLDSV session.
+- **GV-01..09:** chỉ Admin được list/thêm/sửa/xóa business entity `dbo.Giangvien` qua Quản lý giảng viên. Model Lecturer tách khỏi User; service/repository mượn authenticated QLDSV session.
 - `MAGV NCHAR(10)` unique, đúng 10 đơn vị UTF-16 và không khoảng trắng bao quanh; immutable sau tạo. HO/TEN nullable, tối đa 40/10 đơn vị UTF-16; PHAI bit (1 Nam, 0 Nữ). Sửa chỉ HO/TEN/PHAI; giảng viên đã có account vẫn sửa được các field này.
 - Thêm chỉ INSERT Giangvien, không tạo SQL Login/User/role, không gọi AccountService/security account SP. Admin mở Quản lý tài khoản riêng để cấp Admin/GiangVien access cho MAGV đã có. Vì LoginName có thể khác MAGV, collision liên quan account phải dựa trên DatabaseUser/SID mapping chứ không suy từ tên Login.
 - Xóa phải xóa SQL account trước trong Quản lý tài khoản; chặn nếu Database User MAGV còn tồn tại hoặc có Login map SID tới User đó (53006). Không auto-delete account, không để orphan identity.

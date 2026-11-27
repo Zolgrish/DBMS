@@ -1,7 +1,7 @@
 # 06 - Grading / Nhập điểm
 
 **Owner chính:** Người 2  
-**Tickets:** DIEM-01..10, D1-01..04, D2-01..05
+**Tickets:** DIEM-01..11, D1-01..04, D2-01..05
 
 ## Flow
 

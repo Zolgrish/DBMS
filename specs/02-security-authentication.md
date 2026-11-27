@@ -30,7 +30,7 @@ Nếu dùng SQL Login, SQL Server instance phải hỗ trợ SQL Server Authenti
 
 ## SEC-03 - Database roles
 
-Tạo đúng 3 role nghiệp vụ:
+Tạo đúng 3 role nghiệp vụ, đều owned by `dbo`:
 
 - `QLDSV_ADMIN`
 - `QLDSV_GIANGVIEN`
@@ -51,8 +51,8 @@ Admin dùng QLDSV_ACCOUNT_ADMIN + dbcreator; không securityadmin/sysadmin.
 `QLDSV_SINHVIEN`:
 
 - không `INSERT/UPDATE/DELETE` bảng nghiệp vụ;
-- không đọc trực tiếp toàn bộ điểm;
-- chỉ được `EXECUTE` SP cần thiết để xem điểm của chính mình và chức năng student được phép;
+- không đọc trực tiếp toàn bộ các bảng nghiệp vụ;
+- chỉ được `EXECUTE` SP/query object-specific cần thiết để xem lớp của mình, hồ sơ bản thân, môn thuộc lớp mình, điểm của chính mình và đổi mật khẩu;
 - không có server role quản trị.
 
 ## SEC-06 - Permission matrix
@@ -95,6 +95,7 @@ Bắt buộc có account Admin, GiangVien và Student thật để chứng minh:
 - Student `SELECT` trực tiếp dữ liệu điểm ngoài quyền -> bị từ chối.
 - Student `INSERT/UPDATE/DELETE` -> bị từ chối.
 - Admin thực hiện các quyền được cấp.
+- Có case `LoginName != DatabaseUser` nhưng cùng SID; đăng nhập vẫn resolve đúng business identity và role.
 - GiangVien xem được lớp/SV/môn/phân công/điểm trong phạm vi `PhanCong`, nhập/sửa điểm trong phạm vi đó và bị từ chối khi vượt phạm vi.
 - GiangVien bị từ chối xóa điểm, quản lý account và Backup/Restore.
 - Cả ba role đổi mật khẩu bản thân được.

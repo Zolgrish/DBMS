@@ -28,6 +28,7 @@ Repository có thêm bảng bổ trợ `dbo.PhanCong` từ `database/CreatePhanC
 - Có thể khóa/mở SQL account theo chức năng quản trị tài khoản.
 - Có thể đổi mật khẩu của chính SQL Login.
 - Có thể backup/restore khi permission SQL Server cho phép.
+- Quyền server dùng technical role `QLDSV_ACCOUNT_ADMIN` + `dbcreator`; không cấp `securityadmin`/`sysadmin`.
 
 ### GiangVien
 
@@ -62,11 +63,10 @@ Repository có thêm bảng bổ trợ `dbo.PhanCong` từ `database/CreatePhanC
 
 1. **Vắng thi:** đề có khái niệm vắng nhưng `DIEM` là số. Nếu nhóm chốt `NULL = vắng`, phải áp dụng thống nhất ở schema, nhập điểm và report.
 2. **ĐTB:** đề chưa nói trung bình cộng hay trọng số tín chỉ. Không tự chọn.
-3. **Server permissions Admin:** QLDSV_ACCOUNT_ADMIN + dbcreator; không securityadmin/sysadmin.
-4. **Xóa SV + account:** phải không để orphan SQL Login/User; cách transaction/compensation cụ thể cần được thiết kế khi triển khai.
+3. **Xóa SV + account:** phải không để orphan SQL Login/User; cách transaction/compensation cụ thể cần được thiết kế khi triển khai.
 
 ## GiangVien và identity account
 
-Ba business roles duy nhất: QLDSV_ADMIN -> Admin, QLDSV_GIANGVIEN -> GiangVien, QLDSV_SINHVIEN -> SinhVien; mỗi SQL User đúng một role. DatabaseUser/Username của Admin/GiangVien dùng MAGV có sẵn, Student dùng MASV có sẵn. Server LoginName là credential riêng, có thể khác DatabaseUser và phải map 1:1 bằng SID. Account Management chỉ cấp SQL access, không thêm business person.
+Ba business roles duy nhất, đều owned by `dbo`: QLDSV_ADMIN -> Admin, QLDSV_GIANGVIEN -> GiangVien, QLDSV_SINHVIEN -> SinhVien; mỗi SQL User đúng một role. DatabaseUser/Username của Admin/GiangVien dùng MAGV có sẵn, Student dùng MASV có sẵn. Server LoginName là credential riêng, có thể khác DatabaseUser và phải map 1:1 bằng SID. Account Management chỉ cấp SQL access, không thêm business person.
 
 Chỉ Admin có master connection, QLDSV_ACCOUNT_ADMIN + dbcreator và quyền quản trị account/backup. GiangVien không có server admin role/master connection; quyền đọc nghiệp vụ và nhập/sửa điểm phải đi qua SP/query được giới hạn theo `PhanCong`, với MAGV suy từ SQL principal tin cậy. SinhVien chỉ đọc dữ liệu cá nhân/lớp-môn của mình theo SP an toàn. Ma trận quyền đầy đủ tại `02-security-authentication.md`.

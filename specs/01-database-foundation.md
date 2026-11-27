@@ -1,7 +1,7 @@
 # 01 - Database Foundation
 
 **Owner chính:** Người 1  
-**Tickets:** DB-01..DB-09, SP-01..SP-09
+**Tickets:** DB-01..DB-10, SP-01..SP-09
 
 ## Schema
 
@@ -50,11 +50,11 @@
 
 **DB-07/DB-08:** FK, UNIQUE, DEFAULT và CHECK phải nằm trong SQL Server. UI validation có thể lặp lại để UX tốt hơn nhưng không thay thế DB constraint.
 
-## Bảng bổ trợ `PhanCong`
+## DB-10 - Bảng bổ trợ `PhanCong`
 
 Repository hiện có `database/CreatePhanCong.sql`. Script này phải được giữ trong bootstrap database và chạy sau khi 5 bảng cốt lõi đã tồn tại.
 
-`PhanCong` có PK ghép `(MAGV, MALOP, MAMH)` và FK tới `Giangvien`, `Lop`, `Monhoc`. Đây là bảng bổ trợ cho phân công giảng dạy, không phải bảng account và không thay đổi kiến trúc Security.
+`PhanCong` gồm `MAGV NCHAR(10)`, `MALOP NCHAR(8)`, `MAMH NCHAR(5)`; có PK ghép `(MAGV, MALOP, MAMH)` và FK tới `Giangvien`, `Lop`, `Monhoc`. Đây là bảng bổ trợ cho phân công giảng dạy, không phải bảng account và không thay đổi kiến trúc Security.
 
 ## Seed data - DB-09
 
@@ -67,6 +67,7 @@ Seed phải đủ để test ít nhất:
 - điểm lần 1 < 5;
 - trường hợp vắng nếu nhóm chốt cách biểu diễn;
 - có điểm lần 2 để test hiệu chỉnh/MAX.
+- có thể có `PhanCong` mẫu để test tích hợp.
 
 ## Common Stored Procedures
 
@@ -84,8 +85,9 @@ Seed phải đủ để test ít nhất:
 
 ## Acceptance checklist
 
-- Script chạy được trên SQL Server 2014.
+- Schema/SP bám backlog điều chỉnh theo đề và bài giảng SQL Server 2014; runtime hiện tại của repository theo project scope.
 - Tất cả constraint quan trọng được DB enforce.
+- `PhanCong` được bootstrap với đúng ba cột `MAGV/MALOP/MAMH`, PK ghép và 3 FK tới `Giangvien/Lop/Monhoc`.
 - SP-09 không trả SV nghỉ học.
 - Seed data tái tạo được các case test chính.
 - Không thêm `dbo.TaiKhoan` vào schema foundation.

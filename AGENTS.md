@@ -8,8 +8,8 @@ Mục tiêu là triển khai đồ án **Quản Lý Điểm Sinh Viên (QLDSV)**
 Ưu tiên theo thứ tự:
 
 1. Yêu cầu trực tiếp mới nhất của người dùng.
-2. `specs/` trong repository này.
-3. Backlog revised: `Backlog_QLDSV_revised_theo_baigiang.docx`.
+2. Backlog revised 3-role permissions: `Backlog_QLDSV_revised_3Role_Permissions(3).docx`.
+3. `specs/` trong repository này; các spec phải giữ nhất quán với backlog revised ở trên.
 4. Đề đồ án `De1-QLDSV` và bài giảng SQL Server 2014.
 5. Code hiện tại chỉ là **trạng thái đang chuyển đổi**, không được dùng để phủ định spec mới.
 
@@ -31,6 +31,7 @@ Nếu code/README cũ còn nói `dbo.TaiKhoan`, hoặc dùng một DB account ch
 - Application SQL User chỉ có đúng một membership trực tiếp trong `sys.database_role_members`, và role đó phải là business role đã xác định; không có role bổ sung. Cả drift preflight của `Security.sql` và runtime `sp_ThongTinDangNhap` đều enforce; thêm role không liên quan sau bootstrap làm authentication từ chối với `52021`. `public` mặc định không phải membership trực tiếp được đếm.
 - Ẩn/disable menu chỉ là UX. **SQL Server phải tự từ chối thao tác trái quyền kể cả khi service/repository bị gọi trực tiếp.**
 - Sau login, các query nghiệp vụ phải chạy dưới SQL principal của user đang đăng nhập; không quay về một `DB_USERNAME/DB_PASSWORD` chung có toàn quyền.
+- Admin dùng technical server role `QLDSV_ACCOUNT_ADMIN` + `dbcreator` cho quản trị account và Backup/Restore; không cấp `securityadmin`/`sysadmin`.
 
 ### Database
 
@@ -43,7 +44,7 @@ Nếu code/README cũ còn nói `dbo.TaiKhoan`, hoặc dùng một DB account ch
 
 ### Tài khoản sinh viên
 
-- Khi thêm sinh viên thành công: username/login = `MASV`, database user = `MASV`, password mặc định = `123456`, role = `QLDSV_SINHVIEN`.
+- Khi thêm sinh viên thành công: DatabaseUser/Username = `MASV`, password mặc định = `123456`, role = `QLDSV_SINHVIEN`. `LoginName` là credential riêng; flow tự động có thể mặc định `LoginName=MASV`, nhưng kiến trúc phải hỗ trợ `LoginName != DatabaseUser` và map 1:1 bằng SID.
 - Tạo account nghĩa là tạo **SQL Login + Database User + role membership**, không `INSERT dbo.TaiKhoan`.
 - Khi xóa sinh viên phải xử lý account liên quan để không để Login/User mồ côi; thực hiện theo spec tích hợp trước khi xóa dữ liệu sinh viên.
 
@@ -51,7 +52,7 @@ Nếu code/README cũ còn nói `dbo.TaiKhoan`, hoặc dùng một DB account ch
 
 - Quản lý giảng viên (chỉ Admin) sở hữu CRUD `dbo.Giangvien`; Quản lý tài khoản sở hữu SQL Login/User/role. Thêm giảng viên không tự tạo account; Admin cấp SQL access riêng cho MAGV đã tồn tại.
 - MAGV unique, không được đổi sau khi tạo; chỉ cập nhật HO/TEN/PHAI, kể cả khi giảng viên đã có account.
-- Xóa giảng viên phải khóa row `UPDLOCK,HOLDLOCK` trong transaction, cùng thứ tự khóa với `sp_TaoTaiKhoan`, rồi chặn nếu Login hoặc Database User cùng MAGV còn tồn tại. Xóa SQL account trong Quản lý tài khoản trước; không auto-delete account và không để orphan SQL identity.
+- Xóa giảng viên phải khóa row `UPDLOCK,HOLDLOCK` trong transaction, cùng thứ tự khóa với `sp_TaoTaiKhoan`, rồi chặn nếu Database User = MAGV còn tồn tại hoặc có Login map tới User đó bằng cùng SID. Xóa SQL account trong Quản lý tài khoản trước; không auto-delete account và không để orphan SQL identity.
 - Xóa bị chặn khi còn `PhanCong`; không cascade-delete phân công. FK hiện có là bảo vệ cuối cùng. CRUD business ở `StoredProcedures_Lecturer.sql`, tách khỏi security procedures.
 
 ### Sinh viên xem điểm
@@ -73,8 +74,7 @@ Các điểm sau phải giữ trạng thái mở cho tới khi nhóm/người d�
 
 - `DIEM = NULL` có chính thức đại diện cho **vắng thi** hay không. Code hiện tại có thể đang dùng quy ước này nhưng spec nghiệp vụ chỉ chốt khi được xác nhận.
 - Điểm trung bình là trung bình cộng hay có trọng số theo tín chỉ.
-- Cách transaction/rollback cụ thể khi vừa tạo/xóa SQL principal vừa thêm/xóa sinh viên, miễn kết quả cuối không để dữ liệu/account mồ côi.
-- Admin dùng QLDSV_ACCOUNT_ADMIN + dbcreator; không securityadmin/sysadmin.
+- Cách transaction/rollback/compensation cụ thể khi xóa sinh viên cùng SQL principal liên quan, miễn kết quả cuối không để dữ liệu/account mồ côi.
 
 Nếu một task phụ thuộc vào một điểm mở, agent phải ghi rõ và không âm thầm chọn phương án mới.
 

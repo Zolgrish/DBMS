@@ -1,6 +1,6 @@
 # 08 - Integration & Test Plan
 
-**Tickets:** INT-01..INT-17
+**Tickets:** INT-01..INT-22
 
 ## Thứ tự triển khai
 
@@ -29,14 +29,20 @@
 | INT-13 | Đổi SQL password bản thân | Cả 3 role: cũ fail, mới success sau đổi |
 | INT-14 | Exception | Không crash, lỗi có thông điệp phù hợp |
 | INT-15 | UI/menu | Nhất quán với role nhưng không thay DB security |
-| INT-16 | Demo setup | Có demo data + Admin/Student accounts |
+| INT-16 | Demo setup | Có database demo + account demo cho các role cần kiểm thử |
 | INT-17 | End-to-end | Flow chính hoàn chỉnh |
+| INT-18 | LoginName khác DatabaseUser | Cùng SID vẫn đăng nhập, resolve đúng role và business identity |
+| INT-19 | PhanCong integrity/delete guard | PK/FK đúng; chặn xóa GiangVien còn phân công |
+| INT-20 | GiangVien theo PhanCong | Allow trong scope, deny ngoài scope; nhập/sửa được, xóa điểm bị chặn |
+| INT-21 | Khóa/mở SQL account | Admin được phép; GiangVien/SinhVien bị từ chối |
+| INT-22 | Ma trận quyền 3 role | Chứng minh bằng SQL principal thật và UI/menu tương ứng |
 
 ## Security tests bắt buộc
 
 ### Admin principal
 
 - Login trong SSMS bằng Admin credential.
+- Là member `QLDSV_ADMIN`; có technical role `QLDSV_ACCOUNT_ADMIN` + `dbcreator`, không thuộc `securityadmin`/`sysadmin`.
 - CRUD nghiệp vụ theo scope được phép.
 - Tạo/xóa account bằng flow thiết kế.
 - Backup/Restore bằng chính credential này.
@@ -44,6 +50,7 @@
 ### Student principal
 
 - Login bằng `MASV/123456` sau khi auto-create mặc định; case LoginName khác MASV vẫn resolve `USER_NAME()=MASV`.
+- Xem được lớp của mình, hồ sơ bản thân và môn thuộc lớp mình qua SP/query object-specific suy từ principal hiện tại.
 - `sp_SinhVien_XemDiem` trả đúng dữ liệu của mình.
 - Không xem được điểm SV khác.
 - `SELECT` trực tiếp dữ liệu bị hạn chế theo permission matrix.
@@ -77,12 +84,17 @@
 - [ ] Có script GRANT/DENY/role membership chạy lại có kiểm soát.
 - [ ] App login bằng SQL credential của user.
 - [ ] Student auto account login được.
-- [ ] Student chỉ xem điểm mình, không DML.
+- [ ] Student xem đúng lớp/hồ sơ/môn/điểm của mình, không xem dữ liệu ngoài scope và không DML.
 - [ ] Admin CRUD/account/backup/restore bằng Admin login.
 - [ ] Cả ba role đổi mật khẩu bản thân bằng SQL Login hiện tại; password cũ fail, password mới success.
 - [ ] Backup history + restore confirm + connection handling đúng.
 - [ ] Xóa SV không để account mồ côi.
 - [ ] Có script/demo SSMS chứng minh quyền, không chỉ UI.
+- [ ] Có case `LoginName != DatabaseUser` nhưng cùng SID và vẫn resolve đúng MAGV/MASV + role.
+- [ ] `PhanCong` có PK/FK đúng và chặn xóa GiangVien đang còn phân công.
+- [ ] GiangVien allow trong `PhanCong`, deny ngoài `PhanCong`; nhập/sửa được nhưng xóa điểm/account/Backup/Restore bị chặn.
+- [ ] Admin khóa/mở SQL Login được; GiangVien/SinhVien bị từ chối.
+- [ ] Ma trận quyền 22 nghiệp vụ được test bằng SQL principal thật và UI/menu không vượt quyền DB.
 
 ## Test bổ sung cho ba role
 
@@ -94,12 +106,12 @@
 - Change Password áp dụng cả ba role. Assignment-scoped grading là quyền mục tiêu hiện tại và phải enforce `PhanCong(MAGV,MALOP,MAMH)` trong SQL SP.
 - Đích SQL Server 2022, compatibility hiện tại 160 giữ nguyên. Thiếu Admin password hiện tại => real-principal tests/deployment blocked; không dùng sa thay application principal.
 
-## Lecturer CRUD và ranh giới account (GV-01..08 / INT-02, INT-05, INT-15)
+## Lecturer CRUD và ranh giới account (GV-01..09 / INT-02, INT-05, INT-15, INT-19)
 
 - Admin menu có Quản lý giảng viên ngay sau Quản lý sinh viên; GiangVien/SinhVien không có. List dùng common sp_GetGiangVien; mutations dùng lecturer SP riêng và current session, không mở shared connection.
 - Thêm GV00000004 chỉ tạo Giangvien; không có Login/User/role mới. Sau đó Account Management có thể cấp Admin hoặc GiangVien SQL account cho MAGV này. Lecturer form không Username/Password/role controls.
 - Edit khóa MAGV, chỉ HO/TEN/PHAI; vẫn sửa được khi account cùng MAGV tồn tại. Validate UTF-16 limits và nullable names ở Python/SQL.
-- Xóa cần confirm; Login hoặc User còn tồn tại => 53006 và hướng dẫn Quản lý tài khoản. Sau xóa account với ExpectedSid gốc, lecturer còn PhanCong => 53007. Không cascade; xử lý đúng disposable assignment rồi xóa lecturer.
+- Xóa cần confirm; Database User = MAGV còn tồn tại hoặc có Login map cùng SID => 53006 và hướng dẫn Quản lý tài khoản. Sau xóa account với ExpectedSid gốc, lecturer còn PhanCong => 53007. Không cascade; xử lý đúng disposable assignment rồi xóa lecturer.
 - Contract concurrency: delete khóa Giangvien UPDLOCK/HOLDLOCK trước metadata checks, giữ đến COMMIT. Account creation cùng giao thức khóa nên hai thứ tự cạnh tranh không để orphan Login/User. Live two-transaction proof còn phải chạy sau triển khai được phép; unit regex chỉ xác nhận source contract.
 - Service từ chối Guest/Student/Lecturer; SQL object permissions và mutation guards từ chối principal thật. SessionRequiredError/driver errors được dịch an toàn, không lọt qua Qt.
 - Bootstrap lecturer SP sau Security.sql và security SP; không sửa core schema, account SP, default passwords hoặc compatibility level.

@@ -9,6 +9,8 @@ Các report phải chạy dưới principal hiện tại và tuân theo ma trậ
 - GiangVien chỉ được xem dữ liệu lớp, sinh viên, môn và điểm thuộc `dbo.PhanCong` của chính MAGV; không được dùng report để vượt scope.
 - SinhVien không gọi report quản trị; màn hình cá nhân chỉ được xem lớp/môn/điểm của chính mình qua SP/query suy từ MASV hiện tại.
 
+Với GiangVien, mọi report/tổng hợp/pivot phải lọc scope `PhanCong` trước khi tính MAX, ĐTB, xếp loại hoặc dựng cột động; dữ liệu môn/lớp ngoài phân công không được tham gia kết quả.
+
 ## 3.1 - Danh sách Sinh viên (RPT-01..08)
 
 Input: lớp.  

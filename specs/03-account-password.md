@@ -68,7 +68,7 @@ Account SV phải tạo được với password `123456` đúng đề. Nếu pas
 - Admin cấp Admin hoặc GiangVien account cho MAGV đã tồn tại; LoginName là credential name riêng, DatabaseUser/Username vẫn là MAGV.
 - Tạo Student account được kích hoạt từ flow thêm SV của Người 2.
 - Không cho trùng LoginName hoặc mapping lặp một MASV/MAGV.
-- Danh sách account đọc từ SQL Server principals/role membership.
+- Danh sách account đọc từ SQL Server principals/role membership, map Login/User bằng SID và hiển thị riêng DatabaseUser/Username với LoginName.
 - Xóa account có confirm.
 - Trạng thái từ `sys.sql_logins.is_disabled`.
 - Chỉ Admin được khóa/mở account SQL Login; GiangVien/SinhVien không có chức năng này. Khóa/mở không được đổi DatabaseUser, SID mapping hoặc business role.

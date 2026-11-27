@@ -7,14 +7,14 @@ Thư mục này chuyển backlog revised thành đặc tả triển khai cho rep
 | File | Phạm vi | Backlog chính |
 |---|---|---|
 | `00-project-scope.md` | Phạm vi đồ án, role, quy tắc toàn cục, open decisions | Toàn dự án |
-| `01-database-foundation.md` | 5 bảng, constraint, seed, common SP | DB-01..09, SP-01..09 |
+| `01-database-foundation.md` | 5 bảng + PhanCong, constraint, seed, common SP | DB-01..10, SP-01..09 |
 | `02-security-authentication.md` | SSMS Security, Login/User/Role, **ma trận quyền chuẩn 3 role**, login app, connection theo user | SEC-01..07, AUTH-01..08 |
 | `03-account-password.md` | SP tạo/xóa account, quản trị account, đổi SQL Login password | SECSP-01..06, ADM-01..07, PASS-01..05 |
 | `04-backup-restore.md` | Backup/Restore và quyền liên quan | BAK-01..08 |
 | `05-crud-student-integration.md` | CRUD Người 2 và tích hợp SQL account khi thêm/xóa SV | LOP, SV, MH, GV |
 | `06-grading.md` | Nhập điểm lần 1/2, transaction, nghỉ học, vắng | DIEM, D1, D2 |
 | `07-reporting.md` | 5 nhóm báo cáo và logic tổng hợp | RPT-01..36 |
-| `08-integration-test-plan.md` | Merge/integration và test security end-to-end | INT-01..17 |
+| `08-integration-test-plan.md` | Merge/integration và test security end-to-end | INT-01..22 |
 
 ## Nguyên tắc
 
